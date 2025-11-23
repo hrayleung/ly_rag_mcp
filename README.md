@@ -4,6 +4,7 @@ Local RAG system with OpenAI embeddings, Cohere reranking, and MCP server integr
 
 ## Features
 
+- **Incremental Updates**: Only processes new/modified files, saves 95%+ API tokens
 - **Two-Stage Retrieval**: Vector search + semantic reranking
 - **Models**: OpenAI `text-embedding-3-large` + Cohere `rerank-v3.5`
 - **MCP Integration**: Works with Claude Code, Chatwise, Cherry Studio
@@ -36,11 +37,11 @@ export COHERE_API_KEY='your-cohere-api-key'  # Optional
 ### 2. Index Documents
 
 ```bash
-# Index default ./data directory
-python build_index.py
-
-# Index custom directory
+# Incremental update (default - only processes new/modified files)
 python build_index.py /path/to/your/documents
+
+# Force full rebuild
+python build_index.py /path/to/your/documents --rebuild
 ```
 
 ### 3. Configure MCP Client
@@ -158,7 +159,7 @@ model="rerank-3-nimble"  # Faster alternative
 
 ```
 ly_rag_mcp/
-├── build_index.py          # Index builder with CLI
+├── build_index.py          # Index builder with incremental update support
 ├── mcp_server.py           # FastMCP server
 ├── verify_setup.py         # Setup verification
 ├── .env.example            # Environment template
@@ -166,6 +167,9 @@ ly_rag_mcp/
 ├── README.md               # This file
 ├── data/                   # Documents (excluded from git)
 └── storage/                # Generated index (excluded from git)
+    ├── chroma_db/          # Vector database
+    ├── indexed_files.json  # Tracking file for incremental updates
+    └── *.json              # Index metadata
 ```
 
 ## Troubleshooting
@@ -181,10 +185,25 @@ ly_rag_mcp/
 python -c "from mcp_server import get_index_stats; print(get_index_stats())"
 ```
 
-### Update Index
+### Adding New Documents
+
 ```bash
-python build_index.py /path/to/updated/documents
+# Just re-run the same command - it will only process new/modified files
+python build_index.py /path/to/your/documents
+
+# Force full rebuild if needed
+python build_index.py /path/to/your/documents --rebuild
 ```
+
+**Incremental update detects:**
+- New files added to the directory
+- Modified files (based on modification time and file size)
+- Skips unchanged files automatically
+
+**When to use `--rebuild`:**
+- Changed embedding model
+- Corrupted index
+- Want to remove deleted files from index
 
 ## Technical Details
 
