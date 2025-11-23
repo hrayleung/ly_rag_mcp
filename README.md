@@ -88,7 +88,7 @@ Show me the index statistics
 | Media | `.jpg`, `.jpeg`, `.png`, `.mp3`, `.mp4` |
 | Other | `.hwp`, `.mbox` |
 
-File size limit: 10MB per file
+File size limit: 300MB per file
 
 ## MCP Tools
 

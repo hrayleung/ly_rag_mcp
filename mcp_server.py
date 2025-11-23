@@ -33,8 +33,8 @@ _chroma_client = None
 _chroma_collection = None
 _reranker = None
 
-# File upload constraints (2025 best practices)
-MAX_FILE_SIZE_MB = 10
+# File upload constraints
+MAX_FILE_SIZE_MB = 300
 ALLOWED_EXTENSIONS = [
     # Documents
     '.txt', '.pdf', '.docx', '.md', '.epub',
