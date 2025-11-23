@@ -98,7 +98,7 @@ def get_reranker():
     _reranker = CohereRerank(
         api_key=cohere_api_key,
         model="rerank-v3.5",  # Latest Cohere rerank model
-        top_n=3  # Return top 3 after reranking
+        top_n=6  # Return top 6 after reranking
     )
 
     return _reranker
@@ -147,7 +147,7 @@ def get_index():
 
 
 @mcp.tool()
-def query_rag(question: str, similarity_top_k: int = 3, use_rerank: bool = True) -> str:
+def query_rag(question: str, similarity_top_k: int = 6, use_rerank: bool = True) -> str:
     """
     Retrieve relevant documents from the RAG database with optional reranking.
     Returns raw text chunks for the MCP client's LLM to process.
@@ -207,7 +207,7 @@ def query_rag(question: str, similarity_top_k: int = 3, use_rerank: bool = True)
 
 
 @mcp.tool()
-def query_rag_with_sources(question: str, similarity_top_k: int = 3, use_rerank: bool = True) -> dict:
+def query_rag_with_sources(question: str, similarity_top_k: int = 6, use_rerank: bool = True) -> dict:
     """
     Query the RAG database and return source documents with full metadata.
     Similar to query_rag but returns structured data instead of formatted text.

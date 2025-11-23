@@ -117,7 +117,7 @@ Query → Embedding → Vector Search → 10 candidates
                                          ↓
                             Cohere Rerank v3.5
                                          ↓
-                            Top 3 documents → MCP Client
+                            Top 6 documents → MCP Client
                                                     ↓
                                              Client's LLM
 ```
@@ -127,7 +127,7 @@ Query → Embedding → Vector Search → 10 candidates
 Two-stage retrieval process:
 
 1. **Vector Search**: Retrieve 10 candidates via embedding similarity
-2. **Reranking**: Cohere v3.5 reorders by semantic relevance, returns top 3
+2. **Reranking**: Cohere v3.5 reorders by semantic relevance, returns top 6
 
 **Enable**: Add `COHERE_API_KEY` to MCP config
 **Disable**: Set `use_rerank=False` in queries
