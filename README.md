@@ -163,7 +163,6 @@ ly_rag_mcp/
 ├── verify_setup.py         # Setup verification
 ├── .env.example            # Environment template
 ├── .gitignore              # Git ignore
-├── mcp_config_example.json # MCP config template
 ├── RERANK_GUIDE.md         # Reranking documentation
 ├── README.md               # This file
 ├── data/                   # Documents (excluded from git)
