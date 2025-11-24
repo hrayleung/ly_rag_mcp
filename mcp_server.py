@@ -188,10 +188,11 @@ def get_reranker():
         return None  # Reranker is optional
 
     # Create CohereRerank with latest model
-    # Note: top_n is not set here - it will be controlled dynamically per query
+    # Set top_n high enough to handle any query, we'll slice results manually
     _reranker = CohereRerank(
         api_key=cohere_api_key,
         model="rerank-v3.5",  # Latest Cohere rerank model
+        top_n=MAX_TOP_K  # Set to max, we'll slice results manually for dynamic control
     )
 
     return _reranker
@@ -291,8 +292,10 @@ def query_rag(question: str, similarity_top_k: int = DEFAULT_TOP_K, use_rerank: 
         # Apply reranking if available
         if reranker:
             rerank_start = time.time()
-            # Pass top_n dynamically to reranker
-            nodes = reranker.postprocess_nodes(nodes, query_str=question, top_n=similarity_top_k)
+            # Rerank all candidates
+            nodes = reranker.postprocess_nodes(nodes, query_str=question)
+            # Manually slice to get desired top_k
+            nodes = nodes[:similarity_top_k]
             rerank_time = time.time() - rerank_start
             logger.debug(f"Reranking took {rerank_time:.3f}s, returned {len(nodes)} nodes")
             rerank_used = " (reranked with Cohere Rerank v3.5)"
@@ -366,7 +369,9 @@ def query_rag_with_sources(question: str, similarity_top_k: int = DEFAULT_TOP_K,
 
         # Apply reranking if available
         if reranker:
-            nodes = reranker.postprocess_nodes(nodes, query_str=question, top_n=similarity_top_k)
+            nodes = reranker.postprocess_nodes(nodes, query_str=question)
+            # Manually slice to get desired top_k
+            nodes = nodes[:similarity_top_k]
             logger.debug(f"After reranking: {len(nodes)} nodes")
 
         sources = []
@@ -666,7 +671,9 @@ def iterative_search(question: str, initial_top_k: int = 3, detailed_top_k: int 
 
         # Rerank and get top initial results
         if reranker:
-            initial_nodes = reranker.postprocess_nodes(initial_nodes, query_str=question, top_n=initial_top_k)
+            initial_nodes = reranker.postprocess_nodes(initial_nodes, query_str=question)
+            # Manually slice to get desired top_k
+            initial_nodes = initial_nodes[:initial_top_k]
         else:
             initial_nodes = initial_nodes[:initial_top_k]
 
