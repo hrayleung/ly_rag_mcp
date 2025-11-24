@@ -17,6 +17,7 @@ from llama_index.core import (
     load_index_from_storage,
     Document,
 )
+from llama_index.core.node_parser import SentenceSplitter
 from llama_index.embeddings.openai import OpenAIEmbedding
 import chromadb
 from llama_index.vector_stores.chroma import ChromaVectorStore
@@ -89,6 +90,13 @@ def build_index(data_dir: str = "./data", rebuild: bool = False):
 
     # Configure LlamaIndex settings
     Settings.embed_model = OpenAIEmbedding(model="text-embedding-3-large")
+
+    # Configure text splitter to handle large documents
+    # chunk_size=1024 tokens (~4000 chars), overlap=200 chars for context continuity
+    Settings.text_splitter = SentenceSplitter(
+        chunk_size=1024,
+        chunk_overlap=200,
+    )
 
     # Validate data directory
     data_path = Path(data_dir).resolve()
@@ -236,6 +244,14 @@ def build_index(data_dir: str = "./data", rebuild: bool = False):
         print("No valid documents to index!")
         return
 
+    # Check for large documents that will be chunked
+    large_docs = [doc for doc in documents if len(doc.text) > 10000]
+    if large_docs:
+        total_chars = sum(len(doc.text) for doc in large_docs)
+        print(f"\nℹ️  {len(large_docs)} large document(s) detected ({total_chars:,} total chars)")
+        print(f"   Will be automatically chunked into smaller pieces (1024 tokens/chunk)")
+        print(f"   This prevents 'max tokens per request' errors")
+
     # Initialize ChromaDB
     print("Initializing ChromaDB...")
     storage_path.mkdir(parents=True, exist_ok=True)
@@ -256,16 +272,16 @@ def build_index(data_dir: str = "./data", rebuild: bool = False):
 
         # Insert new documents in batch (much faster than one-by-one)
         print(f"Adding {len(documents)} new document(s) to existing index...")
-        from llama_index.core.schema import TextNode
 
+        # Use the configured text splitter to chunk documents properly
+        text_splitter = Settings.text_splitter
         nodes = []
         for doc in documents:
-            node = TextNode(
-                text=doc.text,
-                metadata=doc.metadata
-            )
-            nodes.append(node)
+            # Split document into chunks if needed
+            doc_nodes = text_splitter.get_nodes_from_documents([doc])
+            nodes.extend(doc_nodes)
 
+        print(f"Created {len(nodes)} node(s) from {len(documents)} document(s) (with chunking)")
         index.insert_nodes(nodes, show_progress=True)
     else:
         # Create new index

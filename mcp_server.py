@@ -31,6 +31,7 @@ from llama_index.core import (
     Document,
     Settings,
 )
+from llama_index.core.node_parser import SentenceSplitter
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.postprocessor.cohere_rerank import CohereRerank
 import chromadb
@@ -220,6 +221,12 @@ def get_index():
     # Configure LlamaIndex settings
     # Only need embedding model - MCP client's LLM will generate answers
     Settings.embed_model = OpenAIEmbedding(model="text-embedding-3-large")
+
+    # Configure text splitter (must match build_index.py settings)
+    Settings.text_splitter = SentenceSplitter(
+        chunk_size=1024,
+        chunk_overlap=200,
+    )
 
     # Get cached ChromaDB client and collection
     chroma_client, chroma_collection = get_chroma_client()
@@ -488,18 +495,19 @@ def add_document_from_text(text: str, metadata: dict = None) -> dict:
 
         document = Document(text=text, metadata=doc_metadata)
 
-        # Add to index
+        # Add to index with chunking
         index = get_index()
-        node = document.as_node()
-        index.insert_nodes([node])
+        text_splitter = Settings.text_splitter
+        nodes = text_splitter.get_nodes_from_documents([document])
+        index.insert_nodes(nodes)
 
         # Persist
         index.storage_context.persist(persist_dir=str(STORAGE_PATH))
 
         return {
             "success": True,
-            "message": "Document added successfully",
-            "node_id": node.node_id,
+            "message": f"Document added successfully ({len(nodes)} chunk(s) created)",
+            "chunks_created": len(nodes),
             "text_length": len(text)
         }
     except Exception as e:
@@ -543,9 +551,13 @@ def add_documents_from_directory(directory_path: str) -> dict:
             doc.metadata['ingested_at'] = datetime.now().isoformat()
             doc.metadata['source_directory'] = str(dir_path)
 
-        # Add to index
+        # Add to index with chunking
         index = get_index()
-        nodes = [doc.as_node() for doc in documents]
+        text_splitter = Settings.text_splitter
+        nodes = []
+        for doc in documents:
+            doc_nodes = text_splitter.get_nodes_from_documents([doc])
+            nodes.extend(doc_nodes)
         index.insert_nodes(nodes)
 
         # Persist
@@ -553,8 +565,9 @@ def add_documents_from_directory(directory_path: str) -> dict:
 
         return {
             "success": True,
-            "message": f"Successfully ingested {len(documents)} documents",
+            "message": f"Successfully ingested {len(documents)} documents ({len(nodes)} chunks)",
             "document_count": len(documents),
+            "chunks_created": len(nodes),
             "directory": str(dir_path)
         }
     except Exception as e:
