@@ -32,3 +32,10 @@ Thumbs.db
 
 # User data (contains personal documents)
 data/
+
+# Claude Code MCP config (contains API keys)
+.claude/config.json
+
+# MCP server config (contains API keys)
+.mcp.json
+mcp.json

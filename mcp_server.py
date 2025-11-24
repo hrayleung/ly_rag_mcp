@@ -15,7 +15,11 @@ from datetime import datetime
 from typing import List, Optional
 from functools import wraps
 import time
+import nest_asyncio
 from mcp.server.fastmcp import FastMCP
+
+# Allow nested event loops (needed for GitHub reader)
+nest_asyncio.apply()
 
 # Configure logging
 logging.basicConfig(
@@ -70,7 +74,16 @@ ALLOWED_EXTENSIONS = [
     # Images (can extract text via OCR if needed)
     '.jpg', '.jpeg', '.png',
     # Other
-    '.hwp', '.mbox'
+    '.hwp', '.mbox',
+    # Code files
+    '.py', '.js', '.ts', '.jsx', '.tsx',
+    '.java', '.cpp', '.c', '.h', '.hpp',
+    '.cs', '.go', '.rs', '.rb', '.php',
+    '.swift', '.kt', '.scala', '.r',
+    '.sh', '.bash', '.zsh',
+    '.sql', '.yaml', '.yml', '.toml',
+    '.dockerfile', '.makefile',
+    '.vue', '.svelte', '.astro'
 ]
 
 # Get absolute paths (important for MCP server execution)
@@ -760,6 +773,334 @@ def iterative_search(question: str, initial_top_k: int = 3, detailed_top_k: int 
     except Exception as e:
         logger.error(f"Error in iterative search: {e}", exc_info=True)
         return {"error": f"Error in iterative search: {str(e)}"}
+
+
+@mcp.tool()
+def index_github_repository(
+    owner: str,
+    repo: str,
+    branch: str = "main",
+    filter_dirs: Optional[List[str]] = None,
+    filter_extensions: Optional[List[str]] = None
+) -> dict:
+    """
+    Index a GitHub repository for semantic code search.
+    Clones and indexes code from a public or private GitHub repository.
+
+    Automatically uses GITHUB_TOKEN from environment variables.
+
+    Args:
+        owner: Repository owner (username or organization)
+        repo: Repository name
+        branch: Branch to index (default: "main")
+        filter_dirs: Optional list of directories to include (e.g., ["src", "lib"])
+        filter_extensions: Optional list of file extensions to include (e.g., [".py", ".js"])
+
+    Returns:
+        Dictionary with indexing results
+
+    Example:
+        index_github_repository(
+            owner="OpenBMB",
+            repo="UltraRAG",
+            branch="main"
+        )
+    """
+    try:
+        from llama_index.readers.github import GithubRepositoryReader, GithubClient
+
+        # Read GitHub token from environment variable
+        token = os.getenv("GITHUB_TOKEN")
+        if not token:
+            return {
+                "error": "GitHub token not found",
+                "suggestion": "Set GITHUB_TOKEN environment variable in your .mcp.json config file"
+            }
+
+        logger.info(f"Indexing GitHub repository: {owner}/{repo} (branch: {branch})")
+
+        # Initialize GitHub client
+        github_client = GithubClient(github_token=token, verbose=True)
+
+        # Configure reader
+        reader = GithubRepositoryReader(
+            github_client=github_client,
+            owner=owner,
+            repo=repo,
+            filter_directories=(filter_dirs, GithubRepositoryReader.FilterType.INCLUDE) if filter_dirs else None,
+            filter_file_extensions=(filter_extensions, GithubRepositoryReader.FilterType.INCLUDE) if filter_extensions else None,
+            verbose=True,
+        )
+
+        # Load documents from the repository
+        logger.info("Loading documents from repository...")
+        documents = reader.load_data(branch=branch)
+
+        if not documents:
+            return {
+                "error": f"No documents found in {owner}/{repo}",
+                "suggestion": "Check filter_dirs and filter_extensions, or verify the repository has content"
+            }
+
+        logger.info(f"Loaded {len(documents)} documents from repository")
+
+        # Add metadata
+        for doc in documents:
+            doc.metadata['source'] = 'github'
+            doc.metadata['repository'] = f"{owner}/{repo}"
+            doc.metadata['branch'] = branch
+            doc.metadata['indexed_at'] = datetime.now().isoformat()
+            doc.metadata['indexed_via'] = 'github_indexer'
+
+        # Add to index with chunking
+        index = get_index()
+        text_splitter = Settings.text_splitter
+        nodes = []
+        for doc in documents:
+            doc_nodes = text_splitter.get_nodes_from_documents([doc])
+            nodes.extend(doc_nodes)
+
+        logger.info(f"Created {len(nodes)} chunks from {len(documents)} documents")
+        index.insert_nodes(nodes, show_progress=True)
+
+        # Persist
+        index.storage_context.persist(persist_dir=str(STORAGE_PATH))
+
+        return {
+            "success": True,
+            "message": f"Successfully indexed {owner}/{repo}",
+            "repository": f"{owner}/{repo}",
+            "branch": branch,
+            "documents_indexed": len(documents),
+            "chunks_created": len(nodes),
+            "filters_applied": {
+                "directories": filter_dirs or "all",
+                "extensions": filter_extensions or "all"
+            }
+        }
+
+    except ImportError:
+        return {
+            "error": "GitHub reader not installed",
+            "fix": "Run: pip install llama-index-readers-github"
+        }
+    except Exception as e:
+        logger.error(f"Error indexing GitHub repository: {e}", exc_info=True)
+        return {"error": f"Error indexing repository: {str(e)}"}
+
+
+@mcp.tool()
+def index_local_codebase(
+    directory_path: str,
+    language_filter: Optional[List[str]] = None,
+    exclude_patterns: Optional[List[str]] = None,
+    include_hidden: bool = False
+) -> dict:
+    """
+    Index a local codebase directory with code-aware processing.
+    Optimized for source code with language-specific filtering and common excludes.
+
+    Args:
+        directory_path: Absolute path to the codebase directory
+        language_filter: Optional list of languages/extensions (e.g., ["python", "javascript", ".ts"])
+        exclude_patterns: Optional list of glob patterns to exclude (e.g., ["node_modules", "*.test.js"])
+        include_hidden: Whether to include hidden files/directories (default: False)
+
+    Returns:
+        Dictionary with indexing results
+
+    Example:
+        index_local_codebase(
+            directory_path="/path/to/project",
+            language_filter=["python", "typescript"],
+            exclude_patterns=["node_modules", "__pycache__", "*.pyc"]
+        )
+    """
+    try:
+        dir_path = Path(directory_path).resolve()
+
+        # Validate directory
+        if not dir_path.exists():
+            return {"error": f"Directory not found: {directory_path}"}
+
+        if not dir_path.is_dir():
+            return {"error": f"Path is not a directory: {directory_path}"}
+
+        logger.info(f"Indexing local codebase: {dir_path}")
+
+        # Language to extension mapping
+        LANGUAGE_EXTENSIONS = {
+            "python": [".py"],
+            "javascript": [".js", ".jsx", ".mjs", ".cjs"],
+            "typescript": [".ts", ".tsx"],
+            "java": [".java"],
+            "cpp": [".cpp", ".hpp", ".cc", ".cxx", ".c", ".h"],
+            "csharp": [".cs"],
+            "go": [".go"],
+            "rust": [".rs"],
+            "ruby": [".rb"],
+            "php": [".php"],
+            "swift": [".swift"],
+            "kotlin": [".kt"],
+            "scala": [".scala"],
+            "shell": [".sh", ".bash", ".zsh"],
+            "sql": [".sql"],
+            "html": [".html", ".htm"],
+            "css": [".css", ".scss", ".sass", ".less"],
+            "yaml": [".yaml", ".yml"],
+            "json": [".json"],
+            "xml": [".xml"],
+            "markdown": [".md", ".markdown"],
+            "vue": [".vue"],
+            "svelte": [".svelte"],
+            "astro": [".astro"]
+        }
+
+        # Common directories to exclude by default
+        DEFAULT_EXCLUDES = [
+            "node_modules", "__pycache__", ".git", ".svn", ".hg",
+            "venv", "env", ".venv", ".env",
+            "build", "dist", "target", "out",
+            ".idea", ".vscode", ".vs",
+            "*.pyc", "*.pyo", "*.so", "*.dylib", "*.dll",
+            ".DS_Store", "Thumbs.db"
+        ]
+
+        # Combine default and user excludes
+        exclude_patterns = exclude_patterns or []
+        all_excludes = set(DEFAULT_EXCLUDES + exclude_patterns)
+
+        # Determine which extensions to include
+        allowed_exts = set()
+        if language_filter:
+            for lang in language_filter:
+                # Check if it's a language name
+                if lang.lower() in LANGUAGE_EXTENSIONS:
+                    allowed_exts.update(LANGUAGE_EXTENSIONS[lang.lower()])
+                # Or a direct extension
+                elif lang.startswith('.'):
+                    allowed_exts.add(lang.lower())
+                else:
+                    allowed_exts.add(f".{lang.lower()}")
+        else:
+            # Include all code extensions from ALLOWED_EXTENSIONS
+            allowed_exts = set([ext for ext in ALLOWED_EXTENSIONS if ext not in ['.pdf', '.docx', '.ppt', '.pptx', '.pptm', '.jpg', '.jpeg', '.png', '.hwp', '.mbox', '.epub']])
+
+        logger.info(f"Scanning for extensions: {sorted(allowed_exts)}")
+        logger.info(f"Excluding patterns: {sorted(all_excludes)}")
+
+        # Collect files
+        files_to_index = []
+        skipped_files = []
+
+        for item in dir_path.rglob('*'):
+            # Skip hidden files/dirs if requested
+            if not include_hidden and any(part.startswith('.') for part in item.parts):
+                continue
+
+            # Skip non-files
+            if not item.is_file():
+                continue
+
+            # Check exclusion patterns
+            relative_path = item.relative_to(dir_path)
+            excluded = False
+            for pattern in all_excludes:
+                if pattern in str(relative_path):
+                    excluded = True
+                    break
+                # Check glob patterns
+                if '*' in pattern and relative_path.match(pattern):
+                    excluded = True
+                    break
+
+            if excluded:
+                skipped_files.append(item)
+                continue
+
+            # Check extension
+            if item.suffix.lower() in allowed_exts:
+                files_to_index.append(item)
+            else:
+                skipped_files.append(item)
+
+        if not files_to_index:
+            return {
+                "error": "No files found matching criteria",
+                "scanned_directory": str(dir_path),
+                "filters": {
+                    "languages": language_filter or "all code files",
+                    "extensions": sorted(allowed_exts),
+                    "excluded": sorted(all_excludes)
+                },
+                "suggestion": "Adjust language_filter or exclude_patterns"
+            }
+
+        logger.info(f"Found {len(files_to_index)} files to index, skipped {len(skipped_files)} files")
+
+        # Load documents
+        documents = SimpleDirectoryReader(
+            input_files=[str(f) for f in files_to_index],
+            errors='ignore'
+        ).load_data()
+
+        if not documents:
+            return {"error": "Failed to load documents from codebase"}
+
+        # Add code-specific metadata
+        for doc in documents:
+            doc.metadata['source'] = 'local_codebase'
+            doc.metadata['codebase_root'] = str(dir_path)
+            doc.metadata['indexed_at'] = datetime.now().isoformat()
+            doc.metadata['indexed_via'] = 'codebase_indexer'
+            doc.metadata['content_type'] = 'code'
+
+            # Add language info if available
+            if 'file_path' in doc.metadata:
+                file_ext = Path(doc.metadata['file_path']).suffix.lower()
+                for lang, exts in LANGUAGE_EXTENSIONS.items():
+                    if file_ext in exts:
+                        doc.metadata['language'] = lang
+                        break
+
+        # Add to index with chunking
+        index = get_index()
+        text_splitter = Settings.text_splitter
+        nodes = []
+        for doc in documents:
+            doc_nodes = text_splitter.get_nodes_from_documents([doc])
+            nodes.extend(doc_nodes)
+
+        logger.info(f"Created {len(nodes)} chunks from {len(documents)} code files")
+        index.insert_nodes(nodes, show_progress=True)
+
+        # Persist
+        index.storage_context.persist(persist_dir=str(STORAGE_PATH))
+
+        # Calculate statistics
+        language_stats = {}
+        for doc in documents:
+            lang = doc.metadata.get('language', 'unknown')
+            language_stats[lang] = language_stats.get(lang, 0) + 1
+
+        return {
+            "success": True,
+            "message": f"Successfully indexed codebase at {dir_path}",
+            "codebase_root": str(dir_path),
+            "files_indexed": len(documents),
+            "files_skipped": len(skipped_files),
+            "chunks_created": len(nodes),
+            "language_breakdown": language_stats,
+            "filters_applied": {
+                "languages": language_filter or "all",
+                "extensions": sorted(allowed_exts),
+                "excluded_patterns": sorted(all_excludes)
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Error indexing local codebase: {e}", exc_info=True)
+        return {"error": f"Error indexing codebase: {str(e)}"}
 
 
 @mcp.tool()

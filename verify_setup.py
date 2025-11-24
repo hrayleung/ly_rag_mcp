@@ -10,26 +10,26 @@ def check_imports():
     print("Checking imports...")
     try:
         from llama_index.core import VectorStoreIndex, SimpleDirectoryReader
-        print("  ✓ llama-index-core")
+        print("  [OK] llama-index-core")
 
         from llama_index.embeddings.openai import OpenAIEmbedding
-        print("  ✓ llama-index-embeddings-openai")
+        print("  [OK] llama-index-embeddings-openai")
 
         from llama_index.vector_stores.chroma import ChromaVectorStore
-        print("  ✓ llama-index-vector-stores-chroma")
+        print("  [OK] llama-index-vector-stores-chroma")
 
         from llama_index.postprocessor.cohere_rerank import CohereRerank
-        print("  ✓ llama-index-postprocessor-cohere-rerank")
+        print("  [OK] llama-index-postprocessor-cohere-rerank")
 
         import chromadb
-        print("  ✓ chromadb")
+        print("  [OK] chromadb")
 
         from mcp.server.fastmcp import FastMCP
-        print("  ✓ fastmcp")
+        print("  [OK] fastmcp")
 
         return True
     except ImportError as e:
-        print(f"  ✗ Import error: {e}")
+        print(f"  [ERROR] Import error: {e}")
         return False
 
 def check_openai_key():
@@ -38,13 +38,13 @@ def check_openai_key():
     if os.getenv("OPENAI_API_KEY"):
         key = os.getenv("OPENAI_API_KEY")
         if key.startswith("sk-"):
-            print("  ✓ OPENAI_API_KEY is set")
+            print("  [OK] OPENAI_API_KEY is set")
             return True
         else:
-            print("  ✗ OPENAI_API_KEY doesn't look valid (should start with 'sk-')")
+            print("  [ERROR] OPENAI_API_KEY doesn't look valid (should start with 'sk-')")
             return False
     else:
-        print("  ✗ OPENAI_API_KEY not set")
+        print("  [ERROR] OPENAI_API_KEY not set")
         print("    Set it: export OPENAI_API_KEY='your-key'")
         return False
 
@@ -54,26 +54,26 @@ def check_data_folder():
     if os.path.exists("data"):
         files = os.listdir("data")
         if files:
-            print(f"  ✓ Data folder exists with {len(files)} file(s)")
+            print(f"  [OK] Data folder exists with {len(files)} file(s)")
             for f in files:
                 print(f"    - {f}")
             return True
         else:
-            print("  ⚠ Data folder is empty")
+            print("  [WARNING] Data folder is empty")
             print("    Add documents: cp /path/to/docs/* data/")
             return True
     else:
-        print("  ✗ Data folder not found")
+        print("  [ERROR] Data folder not found")
         return False
 
 def check_mcp_server():
     """Check if MCP server file exists."""
     print("\nChecking MCP server...")
     if os.path.exists("mcp_server.py"):
-        print("  ✓ mcp_server.py exists")
+        print("  [OK] mcp_server.py exists")
         return True
     else:
-        print("  ✗ mcp_server.py not found")
+        print("  [ERROR] mcp_server.py not found")
         return False
 
 def main():
@@ -89,13 +89,13 @@ def main():
 
     print("\n" + "=" * 50)
     if all(results):
-        print("✓ All checks passed!")
+        print("[OK] All checks passed!")
         print("\nNext steps:")
         print("1. Add your documents to data/ folder")
         print("2. Run: python build_index.py")
         print("3. Configure MCP client with config from mcp_config_example.json")
     else:
-        print("✗ Some checks failed. Please fix the issues above.")
+        print("[ERROR] Some checks failed. Please fix the issues above.")
         sys.exit(1)
     print("=" * 50)
 

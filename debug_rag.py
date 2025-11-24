@@ -32,9 +32,9 @@ def check_environment():
     for key, value in checks.items():
         if value:
             masked = value[:8] + "..." + value[-4:] if len(value) > 12 else "***"
-            print(f"✓ {key}: {masked}")
+            print(f"[OK] {key}: {masked}")
         else:
-            status = "⚠" if key == "COHERE_API_KEY" else "✗"
+            status = "[WARNING]" if key == "COHERE_API_KEY" else "[ERROR]"
             print(f"{status} {key}: Not set")
             if key == "OPENAI_API_KEY":
                 print(f"  ERROR: {key} is required!")
@@ -52,11 +52,11 @@ def check_storage():
     storage_path = Path("./storage")
 
     if not storage_path.exists():
-        print("✗ Storage directory not found")
+        print("[ERROR] Storage directory not found")
         print("  Run: python build_index.py /path/to/documents")
         return False
 
-    print(f"✓ Storage directory exists: {storage_path.absolute()}")
+    print(f"[OK] Storage directory exists: {storage_path.absolute()}")
 
     # Check critical files
     files_to_check = [
@@ -71,17 +71,17 @@ def check_storage():
         file_path = storage_path / file
         if file_path.exists():
             size = file_path.stat().st_size
-            print(f"  ✓ {file}: {size:,} bytes")
+            print(f"  [OK] {file}: {size:,} bytes")
         else:
-            print(f"  ⚠ {file}: Missing")
+            print(f"  [WARNING] {file}: Missing")
 
     # Check ChromaDB
     chroma_path = storage_path / "chroma_db"
     if chroma_path.exists():
         chroma_size = sum(f.stat().st_size for f in chroma_path.rglob('*') if f.is_file())
-        print(f"  ✓ chroma_db/: {chroma_size:,} bytes")
+        print(f"  [OK] chroma_db/: {chroma_size:,} bytes")
     else:
-        print(f"  ✗ chroma_db/: Missing")
+        print(f"  [ERROR] chroma_db/: Missing")
         return False
 
     return True
@@ -113,7 +113,7 @@ def load_index_metadata():
             for ext, count in sorted(extensions.items(), key=lambda x: x[1], reverse=True):
                 print(f"  {ext or '(no extension)'}: {count} files")
         else:
-            print("⚠ No tracking data found (indexed_files.json missing)")
+            print("[WARNING] No tracking data found (indexed_files.json missing)")
 
         # Load docstore
         docstore_path = Path("./storage/docstore.json")
@@ -125,7 +125,7 @@ def load_index_metadata():
             print(f"\nDocstore entries: {doc_count}")
 
     except Exception as e:
-        print(f"✗ Error loading metadata: {e}")
+        print(f"[ERROR] Error loading metadata: {e}")
         return False
 
     return True
@@ -205,17 +205,17 @@ def profile_retrieval(query: str = "test query", top_k_values: List[int] = None)
         # Check if results are as expected
         unexpected = [r for r in results if r['results_no_rerank'] != r['top_k']]
         if unexpected:
-            print(f"\n  ⚠ WARNING: {len(unexpected)} queries returned fewer results than requested")
+            print(f"\n  [WARNING] WARNING: {len(unexpected)} queries returned fewer results than requested")
             print("    This indicates the index has fewer documents than some top_k values")
 
         return results
 
     except ImportError as e:
-        print(f"✗ Cannot import dependencies: {e}")
+        print(f"[ERROR] Cannot import dependencies: {e}")
         print("  Make sure you're in the correct conda environment")
         return None
     except Exception as e:
-        print(f"✗ Error during profiling: {e}")
+        print(f"[ERROR] Error during profiling: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -235,60 +235,60 @@ def test_edge_cases():
         try:
             result = query_rag("", similarity_top_k=3)
             tests.append(("Empty query", "PASS" if isinstance(result, str) else "FAIL"))
-            print(f"  ✓ Handled gracefully: {result[:100]}...")
+            print(f"  [OK] Handled gracefully: {result[:100]}...")
         except Exception as e:
             tests.append(("Empty query", f"FAIL: {e}"))
-            print(f"  ✗ Error: {e}")
+            print(f"  [ERROR] Error: {e}")
 
         # Test 2: Very large top_k
         print("\nTest 2: Very large top_k (100)")
         try:
             result = query_rag("test", similarity_top_k=100)
             tests.append(("Large top_k", "PASS" if isinstance(result, str) else "FAIL"))
-            print(f"  ✓ Handled: {result[:100]}...")
+            print(f"  [OK] Handled: {result[:100]}...")
         except Exception as e:
             tests.append(("Large top_k", f"FAIL: {e}"))
-            print(f"  ✗ Error: {e}")
+            print(f"  [ERROR] Error: {e}")
 
         # Test 3: top_k = 0
         print("\nTest 3: Invalid top_k (0)")
         try:
             result = query_rag("test", similarity_top_k=0)
             tests.append(("Zero top_k", "PASS" if isinstance(result, str) else "FAIL"))
-            print(f"  ✓ Handled: {result[:100]}...")
+            print(f"  [OK] Handled: {result[:100]}...")
         except Exception as e:
             tests.append(("Zero top_k", f"FAIL: {e}"))
-            print(f"  ✗ Error: {e}")
+            print(f"  [ERROR] Error: {e}")
 
         # Test 4: Special characters
         print("\nTest 4: Special characters in query")
         try:
-            result = query_rag("test 中文 émojis 🔍", similarity_top_k=3)
+            result = query_rag("test 中文 émojis ", similarity_top_k=3)
             tests.append(("Special chars", "PASS" if isinstance(result, str) else "FAIL"))
-            print(f"  ✓ Handled: {result[:100]}...")
+            print(f"  [OK] Handled: {result[:100]}...")
         except Exception as e:
             tests.append(("Special chars", f"FAIL: {e}"))
-            print(f"  ✗ Error: {e}")
+            print(f"  [ERROR] Error: {e}")
 
         # Test 5: Iterative search
         print("\nTest 5: Iterative search")
         try:
             result = iterative_search("test", initial_top_k=3)
             tests.append(("Iterative search", "PASS" if isinstance(result, dict) else "FAIL"))
-            print(f"  ✓ Returned: {list(result.keys())}")
+            print(f"  [OK] Returned: {list(result.keys())}")
         except Exception as e:
             tests.append(("Iterative search", f"FAIL: {e}"))
-            print(f"  ✗ Error: {e}")
+            print(f"  [ERROR] Error: {e}")
 
         # Test 6: Stats retrieval
         print("\nTest 6: Index stats")
         try:
             stats = get_index_stats()
             tests.append(("Index stats", "PASS" if 'document_count' in stats else "FAIL"))
-            print(f"  ✓ Stats: {stats}")
+            print(f"  [OK] Stats: {stats}")
         except Exception as e:
             tests.append(("Index stats", f"FAIL: {e}"))
-            print(f"  ✗ Error: {e}")
+            print(f"  [ERROR] Error: {e}")
 
         # Summary
         print("\nTest Summary:")
@@ -296,16 +296,16 @@ def test_edge_cases():
         print(f"  Passed: {passed}/{len(tests)}")
 
         for test_name, status in tests:
-            symbol = "✓" if status == "PASS" else "✗"
+            symbol = "[OK]" if status == "PASS" else "[ERROR]"
             print(f"  {symbol} {test_name}: {status}")
 
         return passed == len(tests)
 
     except ImportError as e:
-        print(f"✗ Cannot import dependencies: {e}")
+        print(f"[ERROR] Cannot import dependencies: {e}")
         return False
     except Exception as e:
-        print(f"✗ Error during testing: {e}")
+        print(f"[ERROR] Error during testing: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -332,7 +332,7 @@ def analyze_index_quality():
         print(f"Total documents in ChromaDB: {count}")
 
         if count == 0:
-            print("⚠ Index is empty!")
+            print("[WARNING] Index is empty!")
             return False
 
         # Sample some documents
@@ -367,20 +367,20 @@ def analyze_index_quality():
 
             too_short = sum(1 for l in lengths if l < 50)
             if too_short > 0:
-                print(f"    ⚠ {too_short} documents < 50 chars (may be too short)")
+                print(f"    [WARNING] {too_short} documents < 50 chars (may be too short)")
             else:
-                print(f"    ✓ No suspiciously short documents")
+                print(f"    [OK] No suspiciously short documents")
 
             too_long = sum(1 for l in lengths if l > 50000)
             if too_long > 0:
-                print(f"    ⚠ {too_long} documents > 50K chars (may need chunking)")
+                print(f"    [WARNING] {too_long} documents > 50K chars (may need chunking)")
             else:
-                print(f"    ✓ No suspiciously long documents")
+                print(f"    [OK] No suspiciously long documents")
 
         return True
 
     except Exception as e:
-        print(f"✗ Error analyzing index: {e}")
+        print(f"[ERROR] Error analyzing index: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -420,7 +420,7 @@ Examples:
 
         if not all_passed:
             print("\n" + "="*70)
-            print(" ✗ Critical checks failed! Fix issues before proceeding.")
+            print(" [ERROR] Critical checks failed! Fix issues before proceeding.")
             print("="*70)
             sys.exit(1)
 
@@ -436,9 +436,9 @@ Examples:
 
     print("\n" + "="*70)
     if all_passed:
-        print(" ✓ All checks passed!")
+        print(" [OK] All checks passed!")
     else:
-        print(" ⚠ Some issues detected - review output above")
+        print(" [WARNING] Some issues detected - review output above")
     print("="*70)
 
 

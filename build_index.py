@@ -115,12 +115,22 @@ def build_index(data_dir: str = "./data", rebuild: bool = False):
 
     # Define supported file extensions
     SUPPORTED_EXTS = {
+        # Documents
         '.txt', '.pdf', '.docx', '.md', '.epub',
         '.ppt', '.pptx', '.pptm',
         '.csv', '.json', '.xml',
         '.ipynb', '.html',
         '.jpg', '.jpeg', '.png',
-        '.hwp', '.mbox'
+        '.hwp', '.mbox',
+        # Code files
+        '.py', '.js', '.ts', '.jsx', '.tsx',
+        '.java', '.cpp', '.c', '.h', '.hpp',
+        '.cs', '.go', '.rs', '.rb', '.php',
+        '.swift', '.kt', '.scala', '.r',
+        '.sh', '.bash', '.zsh',
+        '.sql', '.yaml', '.yml', '.toml',
+        '.dockerfile', '.makefile',
+        '.vue', '.svelte', '.astro'
     }
 
     # Scan directory for all files
@@ -142,7 +152,7 @@ def build_index(data_dir: str = "./data", rebuild: bool = False):
 
     # Report unsupported files
     if unsupported_files:
-        print(f"\n⚠ Skipping {len(unsupported_files)} unsupported file(s):")
+        print(f"\nWARNING: Skipping {len(unsupported_files)} unsupported file(s):")
         for f in unsupported_files[:10]:
             print(f"  - {f.name} ({f.suffix})")
         if len(unsupported_files) > 10:
@@ -163,7 +173,7 @@ def build_index(data_dir: str = "./data", rebuild: bool = False):
 
     if rebuild:
         files_to_process = supported_files
-        print(f"\n🔄 Full rebuild mode: processing all {len(supported_files)} file(s)...")
+        print(f"\nFull rebuild mode: processing all {len(supported_files)} file(s)...")
     else:
         for file_path in supported_files:
             if is_file_changed(file_path, tracking_data):
@@ -172,16 +182,16 @@ def build_index(data_dir: str = "./data", rebuild: bool = False):
                 unchanged_files.append(file_path)
 
         if unchanged_files:
-            print(f"\n✓ {len(unchanged_files)} file(s) unchanged, skipping")
+            print(f"\n[OK] {len(unchanged_files)} file(s) unchanged, skipping")
 
         if files_to_process:
-            print(f"📝 {len(files_to_process)} new or modified file(s) to process:")
+            print(f"[PROCESSING] {len(files_to_process)} new or modified file(s) to process:")
             for f in files_to_process[:10]:
                 print(f"  - {f.name}")
             if len(files_to_process) > 10:
                 print(f"  ... and {len(files_to_process) - 10} more")
         else:
-            print("\n✓ No new or modified files. Index is up to date!")
+            print("\n[OK] No new or modified files. Index is up to date!")
             return
 
     # Load only files that need processing
@@ -248,7 +258,7 @@ def build_index(data_dir: str = "./data", rebuild: bool = False):
     large_docs = [doc for doc in documents if len(doc.text) > 10000]
     if large_docs:
         total_chars = sum(len(doc.text) for doc in large_docs)
-        print(f"\nℹ️  {len(large_docs)} large document(s) detected ({total_chars:,} total chars)")
+        print(f"\n[INFO] {len(large_docs)} large document(s) detected ({total_chars:,} total chars)")
         print(f"   Will be automatically chunked into smaller pieces (1024 tokens/chunk)")
         print(f"   This prevents 'max tokens per request' errors")
 
@@ -306,7 +316,7 @@ def build_index(data_dir: str = "./data", rebuild: bool = False):
     # Get final stats
     final_count = chroma_collection.count()
 
-    print("\n✓ Index updated successfully!")
+    print("\n[SUCCESS] Index updated successfully!")
     print(f"  - Source directory: {data_path}")
     print(f"  - Documents processed: {len(documents)}")
     print(f"  - Total documents in index: {final_count}")
@@ -345,5 +355,5 @@ Examples:
     try:
         build_index(data_dir=args.data_dir, rebuild=args.rebuild)
     except Exception as e:
-        print(f"\n✗ Error: {e}")
+        print(f"\n[ERROR] {e}")
         sys.exit(1)
