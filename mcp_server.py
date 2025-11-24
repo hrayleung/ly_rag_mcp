@@ -5,12 +5,24 @@ Enhanced with 2025 best practices:
 - MCP resources pattern for document listing
 - Dynamic document ingestion
 - Contextual retrieval support
+- Comprehensive validation and error handling
+- Performance optimization with caching
 """
 import os
+import logging
 from pathlib import Path
 from datetime import datetime
-from typing import List
+from typing import List, Optional
+from functools import wraps
+import time
 from mcp.server.fastmcp import FastMCP
+
+# Configure logging
+logging.basicConfig(
+    level=os.getenv("RAG_LOG_LEVEL", "WARNING"),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("rag_mcp_server")
 from llama_index.core import (
     StorageContext,
     load_index_from_storage,
@@ -32,6 +44,16 @@ _index = None
 _chroma_client = None
 _chroma_collection = None
 _reranker = None
+
+# Cache performance metrics
+_cache_stats = {
+    "index_loads": 0,
+    "index_cache_hits": 0,
+    "reranker_loads": 0,
+    "reranker_cache_hits": 0,
+    "chroma_loads": 0,
+    "chroma_cache_hits": 0
+}
 
 # File upload constraints
 MAX_FILE_SIZE_MB = 300
@@ -55,13 +77,80 @@ SCRIPT_DIR = Path(__file__).parent.absolute()
 STORAGE_PATH = SCRIPT_DIR / "storage"
 CHROMA_PATH = STORAGE_PATH / "chroma_db"
 
+# Configuration constants
+MIN_TOP_K = 1
+MAX_TOP_K = 50  # Increased from implicit 20 for flexibility
+DEFAULT_TOP_K = 6
+RERANK_CANDIDATE_MULTIPLIER = 2
+MIN_RERANK_CANDIDATES = 10
+
+
+def validate_top_k(top_k: int) -> int:
+    """Validate and clamp top_k parameter."""
+    if not isinstance(top_k, int):
+        logger.warning(f"top_k must be int, got {type(top_k).__name__}, converting...")
+        top_k = int(top_k)
+
+    if top_k < MIN_TOP_K:
+        logger.warning(f"top_k={top_k} too small, using minimum {MIN_TOP_K}")
+        return MIN_TOP_K
+    elif top_k > MAX_TOP_K:
+        logger.warning(f"top_k={top_k} too large, using maximum {MAX_TOP_K}")
+        return MAX_TOP_K
+
+    return top_k
+
+
+def validate_query(query: str) -> str:
+    """Validate and clean query string."""
+    if not query or not isinstance(query, str):
+        raise ValueError("Query must be a non-empty string")
+
+    query = query.strip()
+
+    if not query:
+        raise ValueError("Query cannot be empty or whitespace only")
+
+    if len(query) > 10000:
+        logger.warning(f"Query is very long ({len(query)} chars), truncating to 10000")
+        query = query[:10000]
+
+    return query
+
+
+def log_performance(func):
+    """Decorator to log function performance."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        function_name = func.__name__
+
+        logger.info(f"Starting {function_name}")
+
+        try:
+            result = func(*args, **kwargs)
+            elapsed = time.time() - start_time
+            logger.info(f"Completed {function_name} in {elapsed:.3f}s")
+            return result
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(f"Failed {function_name} after {elapsed:.3f}s: {e}")
+            raise
+
+    return wrapper
+
 
 def get_chroma_client():
     """Get or create ChromaDB client (cached)."""
-    global _chroma_client, _chroma_collection
+    global _chroma_client, _chroma_collection, _cache_stats
 
     if _chroma_client is not None:
+        _cache_stats["chroma_cache_hits"] += 1
+        logger.debug("ChromaDB client: cache hit")
         return _chroma_client, _chroma_collection
+
+    _cache_stats["chroma_loads"] += 1
+    logger.debug("ChromaDB client: loading from disk")
 
     # Ensure directories exist
     STORAGE_PATH.mkdir(parents=True, exist_ok=True)
@@ -84,10 +173,14 @@ def get_chroma_client():
 
 def get_reranker():
     """Get or create Cohere Reranker (cached)."""
-    global _reranker
+    global _reranker, _cache_stats
 
     if _reranker is not None:
+        _cache_stats["reranker_cache_hits"] += 1
+        logger.debug("Reranker: cache hit")
         return _reranker
+
+    _cache_stats["reranker_loads"] += 1
 
     # Check for Cohere API key
     cohere_api_key = os.getenv("COHERE_API_KEY")
@@ -95,10 +188,10 @@ def get_reranker():
         return None  # Reranker is optional
 
     # Create CohereRerank with latest model
+    # Note: top_n is not set here - it will be controlled dynamically per query
     _reranker = CohereRerank(
         api_key=cohere_api_key,
         model="rerank-v3.5",  # Latest Cohere rerank model
-        top_n=6  # Return top 6 after reranking
     )
 
     return _reranker
@@ -106,10 +199,15 @@ def get_reranker():
 
 def get_index():
     """Load the RAG index from storage (cached). Creates new index if doesn't exist."""
-    global _index
+    global _index, _cache_stats
 
     if _index is not None:
+        _cache_stats["index_cache_hits"] += 1
+        logger.debug("Index: cache hit")
         return _index
+
+    _cache_stats["index_loads"] += 1
+    logger.debug("Index: loading from storage")
 
     # Check for OpenAI API key
     if not os.getenv("OPENAI_API_KEY"):
@@ -147,7 +245,8 @@ def get_index():
 
 
 @mcp.tool()
-def query_rag(question: str, similarity_top_k: int = 6, use_rerank: bool = True) -> str:
+@log_performance
+def query_rag(question: str, similarity_top_k: int = DEFAULT_TOP_K, use_rerank: bool = True) -> str:
     """
     Retrieve relevant documents from the RAG database with optional reranking.
     Returns raw text chunks for the MCP client's LLM to process.
@@ -155,30 +254,47 @@ def query_rag(question: str, similarity_top_k: int = 6, use_rerank: bool = True)
 
     Args:
         question: The question/query to search for
-        similarity_top_k: Number of final documents to return (default: 3)
+        similarity_top_k: Number of final documents to return (default: 6, range: 1-50)
         use_rerank: Whether to use Cohere reranking for better accuracy (default: True)
 
     Returns:
         Formatted string with retrieved document chunks and metadata
     """
     try:
+        # Validate inputs
+        question = validate_query(question)
+        similarity_top_k = validate_top_k(similarity_top_k)
+
+        logger.debug(f"Query: '{question[:100]}...', top_k={similarity_top_k}, rerank={use_rerank}")
+
         index = get_index()
         reranker = get_reranker() if use_rerank else None
 
-        # If using reranker, retrieve more candidates (10) for reranking
-        # Otherwise, retrieve the requested number
-        initial_top_k = 10 if reranker else similarity_top_k
+        # If using reranker, retrieve more candidates for reranking
+        # Use 2x similarity_top_k or MIN_RERANK_CANDIDATES, whichever is larger
+        if reranker:
+            initial_top_k = max(similarity_top_k * RERANK_CANDIDATE_MULTIPLIER, MIN_RERANK_CANDIDATES)
+            logger.debug(f"Using reranker: retrieving {initial_top_k} candidates for top {similarity_top_k}")
+        else:
+            initial_top_k = similarity_top_k
+            logger.debug(f"No reranker: retrieving {initial_top_k} documents directly")
+
         retriever = index.as_retriever(similarity_top_k=initial_top_k)
         nodes = retriever.retrieve(question)
 
+        logger.debug(f"Retrieved {len(nodes)} initial candidates")
+
         if not nodes:
+            logger.info("No relevant documents found")
             return "No relevant documents found in the knowledge base."
 
         # Apply reranking if available
         if reranker:
-            nodes = reranker.postprocess_nodes(nodes, query_str=question)
-            # Take top similarity_top_k after reranking
-            nodes = nodes[:similarity_top_k]
+            rerank_start = time.time()
+            # Pass top_n dynamically to reranker
+            nodes = reranker.postprocess_nodes(nodes, query_str=question, top_n=similarity_top_k)
+            rerank_time = time.time() - rerank_start
+            logger.debug(f"Reranking took {rerank_time:.3f}s, returned {len(nodes)} nodes")
             rerank_used = " (reranked with Cohere Rerank v3.5)"
         else:
             rerank_used = ""
@@ -200,36 +316,49 @@ def query_rag(question: str, similarity_top_k: int = 6, use_rerank: bool = True)
 
             result += "\n"
 
+        logger.info(f"Successfully retrieved and formatted {len(nodes)} documents")
         return result
 
+    except ValueError as e:
+        logger.error(f"Validation error: {e}")
+        return f"Invalid input: {str(e)}"
     except Exception as e:
+        logger.error(f"Error retrieving documents: {e}", exc_info=True)
         return f"Error retrieving documents: {str(e)}"
 
 
 @mcp.tool()
-def query_rag_with_sources(question: str, similarity_top_k: int = 6, use_rerank: bool = True) -> dict:
+@log_performance
+def query_rag_with_sources(question: str, similarity_top_k: int = DEFAULT_TOP_K, use_rerank: bool = True) -> dict:
     """
     Query the RAG database and return source documents with full metadata.
     Similar to query_rag but returns structured data instead of formatted text.
 
     Args:
         question: The question to ask the RAG system
-        similarity_top_k: Number of most similar documents to retrieve (default: 3)
+        similarity_top_k: Number of most similar documents to retrieve (default: 6, range: 1-50)
         use_rerank: Whether to use Cohere reranking for better accuracy (default: True)
 
     Returns:
         Dictionary with 'sources' and metadata
     """
     try:
+        # Validate inputs
+        question = validate_query(question)
+        similarity_top_k = validate_top_k(similarity_top_k)
+
+        logger.debug(f"Query with sources: '{question[:100]}...', top_k={similarity_top_k}")
+
         index = get_index()
         reranker = get_reranker() if use_rerank else None
 
         # If using reranker, retrieve more candidates for reranking
-        initial_top_k = 10 if reranker else similarity_top_k
+        initial_top_k = max(similarity_top_k * RERANK_CANDIDATE_MULTIPLIER, MIN_RERANK_CANDIDATES) if reranker else similarity_top_k
         retriever = index.as_retriever(similarity_top_k=initial_top_k)
         nodes = retriever.retrieve(question)
 
         if not nodes:
+            logger.info("No relevant documents found")
             return {
                 "sources": [],
                 "message": "No relevant documents found"
@@ -237,26 +366,70 @@ def query_rag_with_sources(question: str, similarity_top_k: int = 6, use_rerank:
 
         # Apply reranking if available
         if reranker:
-            nodes = reranker.postprocess_nodes(nodes, query_str=question)
-            nodes = nodes[:similarity_top_k]
+            nodes = reranker.postprocess_nodes(nodes, query_str=question, top_n=similarity_top_k)
+            logger.debug(f"After reranking: {len(nodes)} nodes")
 
         sources = []
         for node in nodes:
+            content = node.node.get_content()
             sources.append({
-                "text": node.node.get_content(),
-                "text_preview": node.node.get_content()[:200] + "...",
+                "text": content,
+                "text_preview": content[:200] + "..." if len(content) > 200 else content,
                 "score": float(node.score) if node.score else None,
                 "metadata": node.node.metadata,
             })
 
+        logger.info(f"Successfully retrieved {len(sources)} sources")
         return {
             "sources": sources,
             "total_found": len(sources),
             "reranked": reranker is not None,
             "rerank_model": "rerank-v3.5" if reranker else None
         }
+    except ValueError as e:
+        logger.error(f"Validation error: {e}")
+        return {"error": f"Invalid input: {str(e)}"}
     except Exception as e:
+        logger.error(f"Error querying RAG: {e}", exc_info=True)
         return {"error": f"Error querying RAG: {str(e)}"}
+
+
+@mcp.tool()
+def get_cache_stats() -> dict:
+    """
+    Get cache performance metrics to understand caching efficiency.
+
+    Returns:
+        Dictionary with cache hit/miss statistics
+    """
+    global _cache_stats
+
+    total_index = _cache_stats["index_loads"] + _cache_stats["index_cache_hits"]
+    total_reranker = _cache_stats["reranker_loads"] + _cache_stats["reranker_cache_hits"]
+    total_chroma = _cache_stats["chroma_loads"] + _cache_stats["chroma_cache_hits"]
+
+    index_hit_rate = (_cache_stats["index_cache_hits"] / total_index * 100) if total_index > 0 else 0
+    reranker_hit_rate = (_cache_stats["reranker_cache_hits"] / total_reranker * 100) if total_reranker > 0 else 0
+    chroma_hit_rate = (_cache_stats["chroma_cache_hits"] / total_chroma * 100) if total_chroma > 0 else 0
+
+    return {
+        "index": {
+            "cache_hits": _cache_stats["index_cache_hits"],
+            "loads": _cache_stats["index_loads"],
+            "hit_rate": f"{index_hit_rate:.1f}%"
+        },
+        "reranker": {
+            "cache_hits": _cache_stats["reranker_cache_hits"],
+            "loads": _cache_stats["reranker_loads"],
+            "hit_rate": f"{reranker_hit_rate:.1f}%"
+        },
+        "chroma": {
+            "cache_hits": _cache_stats["chroma_cache_hits"],
+            "loads": _cache_stats["chroma_loads"],
+            "hit_rate": f"{chroma_hit_rate:.1f}%"
+        },
+        "summary": f"Cache is working well" if min(index_hit_rate, chroma_hit_rate) > 50 else "Cache warming up"
+    }
 
 
 @mcp.tool()
@@ -422,6 +595,7 @@ def list_indexed_documents() -> dict:
             content = node.node.get_content()
             docs.append({
                 "index": i,
+                "node_id": node.node.node_id,
                 "text_preview": content[:150] + "..." if len(content) > 150 else content,
                 "metadata": node.node.metadata,
                 "text_length": len(content),
@@ -437,6 +611,135 @@ def list_indexed_documents() -> dict:
         }
     except Exception as e:
         return {"error": f"Error listing documents: {str(e)}"}
+
+
+@mcp.tool()
+@log_performance
+def iterative_search(question: str, initial_top_k: int = 3, detailed_top_k: int = 10) -> dict:
+    """
+    Perform a two-phase iterative search: first get a small set of highly relevant results,
+    then optionally retrieve more for deeper exploration.
+
+    This tool encourages multi-round search patterns by:
+    1. Returning initial focused results (default 3)
+    2. Providing metadata to help decide if more context is needed
+    3. Suggesting if a follow-up search with more results would be beneficial
+
+    The MCP client's LLM can then decide whether to:
+    - Use the initial results if they're sufficient
+    - Request more results by calling query_rag() with higher similarity_top_k
+    - Refine the question and search again
+    - Search for specific aspects mentioned in the initial results
+
+    Args:
+        question: The question/query to search for
+        initial_top_k: Number of initial results to return (default: 3, recommended: 2-5)
+        detailed_top_k: Number of results available for detailed exploration (default: 10)
+
+    Returns:
+        Dictionary with initial results and suggestions for refinement
+    """
+    try:
+        # Validate inputs
+        question = validate_query(question)
+        initial_top_k = validate_top_k(initial_top_k)
+        detailed_top_k = validate_top_k(detailed_top_k)
+
+        logger.debug(f"Iterative search: '{question[:100]}...', initial={initial_top_k}, detailed={detailed_top_k}")
+
+        index = get_index()
+        reranker = get_reranker()
+
+        # Get initial focused results
+        candidate_count = max(initial_top_k * RERANK_CANDIDATE_MULTIPLIER, MIN_RERANK_CANDIDATES)
+        initial_retriever = index.as_retriever(similarity_top_k=candidate_count)
+        initial_nodes = initial_retriever.retrieve(question)
+
+        logger.debug(f"Retrieved {len(initial_nodes)} candidates for iterative search")
+
+        if not initial_nodes:
+            return {
+                "initial_results": [],
+                "message": "No relevant documents found",
+                "suggestion": "Try rephrasing the question or using different keywords"
+            }
+
+        # Rerank and get top initial results
+        if reranker:
+            initial_nodes = reranker.postprocess_nodes(initial_nodes, query_str=question, top_n=initial_top_k)
+        else:
+            initial_nodes = initial_nodes[:initial_top_k]
+
+        # Format initial results
+        initial_results = []
+        topics_found = set()
+
+        for i, node in enumerate(initial_nodes, 1):
+            content = node.node.get_content()
+            result = {
+                "rank": i,
+                "text": content,
+                "preview": content[:300] + "..." if len(content) > 300 else content,
+                "score": float(node.score) if node.score else None,
+                "metadata": node.node.metadata,
+                "length": len(content)
+            }
+            initial_results.append(result)
+
+            # Extract potential topics for refinement suggestions
+            if node.node.metadata and 'file_name' in node.node.metadata:
+                topics_found.add(node.node.metadata['file_name'])
+
+        # Analyze score distribution to suggest if more results needed
+        if initial_results:
+            scores = [r['score'] for r in initial_results if r['score'] is not None]
+            avg_score = sum(scores) / len(scores) if scores else 0
+
+            # Generate refinement suggestions
+            suggestions = []
+
+            if avg_score < 0.7 and len(scores) > 0:
+                suggestions.append(
+                    f"Initial results have moderate relevance (avg score: {avg_score:.2f}). "
+                    "Consider refining the question or trying different keywords."
+                )
+
+            if len(initial_results) < initial_top_k:
+                suggestions.append(
+                    f"Only {len(initial_results)} documents found. The knowledge base may have limited information on this topic."
+                )
+            else:
+                suggestions.append(
+                    f"Found {len(initial_results)} initial results. "
+                    f"You can retrieve up to {detailed_top_k} more results using query_rag(similarity_top_k={detailed_top_k}) "
+                    "if you need broader context or want to explore related topics."
+                )
+
+            if topics_found:
+                suggestions.append(
+                    f"Documents found in: {', '.join(list(topics_found)[:3])}. "
+                    "You can search for specific aspects within these sources."
+                )
+
+        return {
+            "initial_results": initial_results,
+            "total_initial": len(initial_results),
+            "reranked": reranker is not None,
+            "suggestions": suggestions,
+            "next_steps": [
+                f"If satisfied: Use these {len(initial_results)} results to answer the question",
+                f"If need more context: Call query_rag(question='{question}', similarity_top_k={detailed_top_k})",
+                "If need clarification: Refine the question and search again",
+                "If found specific topics: Search for those specific aspects"
+            ]
+        }
+
+    except ValueError as e:
+        logger.error(f"Validation error in iterative search: {e}")
+        return {"error": f"Invalid input: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Error in iterative search: {e}", exc_info=True)
+        return {"error": f"Error in iterative search: {str(e)}"}
 
 
 @mcp.tool()

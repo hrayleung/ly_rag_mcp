@@ -202,9 +202,23 @@ def build_index(data_dir: str = "./data", rebuild: bool = False):
             cleaned = ''.join(char for char in cleaned if char.isprintable() or char in '\n\t ')
 
             if len(cleaned.strip()) > 10:
+                # Clean metadata - ChromaDB only accepts str, int, float, None
+                clean_metadata = {}
+                for key, value in doc.metadata.items():
+                    if isinstance(value, (str, int, float, type(None))):
+                        clean_metadata[key] = value
+                    elif isinstance(value, bool):
+                        clean_metadata[key] = str(value)
+                    elif isinstance(value, (list, dict)):
+                        # Skip complex types that ChromaDB doesn't support
+                        continue
+                    else:
+                        # Convert other types to string
+                        clean_metadata[key] = str(value)
+
                 new_doc = Document(
                     text=cleaned,
-                    metadata=doc.metadata,
+                    metadata=clean_metadata,
                     excluded_llm_metadata_keys=doc.excluded_llm_metadata_keys,
                     excluded_embed_metadata_keys=doc.excluded_embed_metadata_keys,
                 )
@@ -240,10 +254,19 @@ def build_index(data_dir: str = "./data", rebuild: bool = False):
         )
         index = load_index_from_storage(storage_context)
 
-        # Insert new documents
+        # Insert new documents in batch (much faster than one-by-one)
         print(f"Adding {len(documents)} new document(s) to existing index...")
+        from llama_index.core.schema import TextNode
+
+        nodes = []
         for doc in documents:
-            index.insert(doc)
+            node = TextNode(
+                text=doc.text,
+                metadata=doc.metadata
+            )
+            nodes.append(node)
+
+        index.insert_nodes(nodes, show_progress=True)
     else:
         # Create new index
         print("Building new index...")

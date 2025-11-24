@@ -94,15 +94,25 @@ File size limit: 300MB per file
 ## MCP Tools
 
 ### Query
-- `query_rag(question, similarity_top_k=3, use_rerank=True)` - Retrieve documents
-- `query_rag_with_sources(question, similarity_top_k=3, use_rerank=True)` - With metadata
+- `query_rag(question, similarity_top_k=6, use_rerank=True)` - Retrieve documents
+  - **NEW**: `similarity_top_k` is now fully flexible (1-20) - let the LLM decide based on needs
+- `query_rag_with_sources(question, similarity_top_k=6, use_rerank=True)` - With metadata
+  - **NEW**: Same flexibility as query_rag
+- `iterative_search(question, initial_top_k=3, detailed_top_k=10)` - **NEW** two-phase search
+  - Start with focused results, get suggestions for follow-up searches
+  - Encourages multi-round refinement for better accuracy
 
 ### Management
 - `get_index_stats()` - Index statistics
+- `get_cache_stats()` - **NEW** Cache performance metrics
 - `list_indexed_documents()` - List all documents
 - `add_document_from_text(text, metadata)` - Add text dynamically
 - `add_documents_from_directory(path)` - Bulk import
 - `clear_index()` - Clear index
+
+### Debugging
+- `python debug_rag.py` - **NEW** Comprehensive diagnostics and profiling tool
+- Set `RAG_LOG_LEVEL=DEBUG` in MCP config for detailed logging
 
 ### Resources
 - `rag://documents` - Browse documents
@@ -113,21 +123,53 @@ File size limit: 300MB per file
 ```
 Documents → text-embedding-3-large → ChromaDB
                                          ↓
-Query → Embedding → Vector Search → 10 candidates
+Query → Embedding → Vector Search → Dynamic candidates (2x requested)
                                          ↓
-                            Cohere Rerank v3.5
+                            Cohere Rerank v3.5 (optional)
                                          ↓
-                            Top 6 documents → MCP Client
-                                                    ↓
-                                             Client's LLM
+                            Top N documents (LLM decides: 1-20) → MCP Client
+                                                                          ↓
+                                                                   Client's LLM
 ```
+
+## Search Strategies
+
+### Multi-Round Search (Recommended)
+
+Instead of requesting many results in a single query, use iterative refinement:
+
+**Example 1: Start Focused, Expand if Needed**
+```
+1. Use iterative_search("Python async patterns", initial_top_k=3)
+2. Review the 3 most relevant results
+3. If more context needed: query_rag("Python async patterns", similarity_top_k=10)
+4. Or refine: query_rag("asyncio event loop internals", similarity_top_k=5)
+```
+
+**Example 2: Progressive Deepening**
+```
+1. query_rag("machine learning", similarity_top_k=5) - understand scope
+2. query_rag("neural network backpropagation", similarity_top_k=5) - focus on specific topic
+3. query_rag("gradient descent optimization", similarity_top_k=3) - deep dive
+```
+
+**Benefits**:
+- Better accuracy: Focus on most relevant results
+- Token efficiency: Only retrieve what you need
+- Course correction: Refine based on actual findings
+- Less noise: Avoid diluting context with marginally relevant documents
 
 ## Reranking
 
 Two-stage retrieval process:
 
-1. **Vector Search**: Retrieve 10 candidates via embedding similarity
-2. **Reranking**: Cohere v3.5 reorders by semantic relevance, returns top 6
+1. **Vector Search**: Retrieve 2x candidates (e.g., 20 candidates for top 10 results, minimum 10)
+2. **Reranking**: Cohere v3.5 reorders by semantic relevance, returns requested top N
+
+The system dynamically adjusts candidate retrieval based on your `similarity_top_k` setting:
+- Request 3 results → retrieves 10 candidates → reranks → returns top 3
+- Request 10 results → retrieves 20 candidates → reranks → returns top 10
+- Request 15 results → retrieves 30 candidates → reranks → returns top 15
 
 **Enable**: Add `COHERE_API_KEY` to MCP config
 **Disable**: Set `use_rerank=False` in queries
@@ -174,16 +216,53 @@ ly_rag_mcp/
 
 ## Troubleshooting
 
+### Quick Diagnostics
+```bash
+# Run the comprehensive debug tool first!
+python debug_rag.py
+
+# This will check:
+# - Environment variables (API keys)
+# - Storage integrity
+# - Index quality
+# - Performance metrics
+# - Edge cases
+```
+
 ### MCP Server Not Connecting
 1. Verify Python path in MCP config
 2. Check API keys in `env` section
 3. Ensure `cwd` points to project directory
 4. Restart MCP client
+5. Check logs with `RAG_LOG_LEVEL=DEBUG` in MCP config
 
 ### No Documents Retrieved
 ```bash
+# Check if index has documents
 python -c "from mcp_server import get_index_stats; print(get_index_stats())"
+
+# If document_count is 0:
+python build_index.py /path/to/your/documents
 ```
+
+### Slow Performance
+```bash
+# Profile retrieval performance
+python debug_rag.py --profile
+
+# Check cache efficiency
+python -c "from mcp_server import get_cache_stats; print(get_cache_stats())"
+
+# If cache hit rate < 90% after multiple queries:
+# - Check MCP client logs for server restarts
+# - Server should stay running between queries
+```
+
+### Poor Relevance
+- Try `iterative_search()` instead of `query_rag()` for better refinement
+- Check relevance scores in results (should be > 0.7 for good matches)
+- Use multi-round search: start with 3 results, refine based on findings
+- Increase `similarity_top_k` to get more candidates
 
 ### Adding New Documents
 
@@ -204,6 +283,24 @@ python build_index.py /path/to/your/documents --rebuild
 - Changed embedding model
 - Corrupted index
 - Want to remove deleted files from index
+
+### Debug Logging
+
+Add to your MCP config:
+```json
+"env": {
+  "OPENAI_API_KEY": "...",
+  "COHERE_API_KEY": "...",
+  "RAG_LOG_LEVEL": "DEBUG"
+}
+```
+
+This will log:
+- Query validation and parameters
+- Cache hits/misses
+- Retrieval and reranking details
+- Performance timings
+- Full error stack traces
 
 ## Technical Details
 
