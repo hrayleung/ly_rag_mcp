@@ -108,6 +108,7 @@ File size limit: 300MB per file
 - `iterative_search(question, initial_top_k=3, detailed_top_k=10)` - Two-phase search
 
 ### Ingestion
+- `inspect_directory(path)` - **NEW** Analyze folder to decide between Codebase vs Documents
 - `crawl_website(url, max_depth=1, max_pages=10)` - **NEW** Crawl and index websites (requires `FIRECRAWL_API_KEY`)
 - `add_document_from_text(text, metadata)` - Add text dynamically
 - `add_documents_from_directory(path)` - Bulk import

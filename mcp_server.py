@@ -1151,6 +1151,118 @@ def index_github_repository(
 
 
 @mcp.tool()
+def inspect_directory(path: str) -> dict:
+    """
+    Analyze a directory to determine if it contains a codebase or documents.
+    Use this BEFORE indexing to decide which tool to use.
+
+    Args:
+        path: Absolute path to the directory
+
+    Returns:
+        Analysis containing file counts, types, and a recommendation:
+        - 'index_local_codebase': If it looks like a software project (has code, .git, package files)
+        - 'add_documents_from_directory': If it looks like a collection of docs (PDF, DOCX, TXT)
+        - 'ask_user': If it's empty, ambiguous, or mixed
+    """
+    try:
+        dir_path = Path(path).resolve()
+        
+        if not dir_path.exists():
+            return {"error": f"Path not found: {path}"}
+        if not dir_path.is_dir():
+            return {"error": f"Path is not a directory: {path}"}
+
+        # Code markers
+        CODE_INDICATORS = {
+            'files': {'package.json', 'requirements.txt', 'Cargo.toml', 'go.mod', 'pom.xml', 'build.gradle', 'Makefile', 'CMakeLists.txt'},
+            'dirs': {'.git', '.vscode', '.idea', 'src', 'lib', 'include', 'node_modules', 'venv'}
+        }
+        
+        # Extensions
+        CODE_EXTS = {'.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.cpp', '.c', '.h', '.cs', '.go', '.rs', '.rb', '.php', '.swift', '.kt', '.sql', '.html', '.css', '.sh'}
+        DOC_EXTS = {'.pdf', '.docx', '.doc', '.ppt', '.pptx', '.xls', '.xlsx', '.csv', '.epub', '.md', '.txt', '.rtf'}
+
+        # Stats
+        stats = {
+            "total_files": 0,
+            "code_files": 0,
+            "doc_files": 0,
+            "extensions": {},
+            "markers_found": []
+        }
+        
+        # Quick scan (limit to 1000 files to be fast)
+        file_limit = 1000
+        scanned = 0
+        
+        for root, dirs, files in os.walk(dir_path):
+            # Check markers
+            root_path = Path(root)
+            if root_path == dir_path:
+                for d in dirs:
+                    if d in CODE_INDICATORS['dirs']:
+                        stats['markers_found'].append(d + "/")
+                for f in files:
+                    if f in CODE_INDICATORS['files']:
+                        stats['markers_found'].append(f)
+
+            for f in files:
+                if scanned >= file_limit:
+                    break
+                    
+                ext = Path(f).suffix.lower()
+                stats["total_files"] += 1
+                stats["extensions"][ext] = stats["extensions"].get(ext, 0) + 1
+                
+                if ext in CODE_EXTS:
+                    stats["code_files"] += 1
+                elif ext in DOC_EXTS:
+                    stats["doc_files"] += 1
+                
+                scanned += 1
+            
+            if scanned >= file_limit:
+                break
+
+        # Decision Logic
+        recommendation = "ask_user"
+        reason = "Ambiguous content"
+        
+        is_codebase_structure = bool(stats['markers_found'])
+        code_ratio = stats['code_files'] / stats['total_files'] if stats['total_files'] > 0 else 0
+        doc_ratio = stats['doc_files'] / stats['total_files'] if stats['total_files'] > 0 else 0
+
+        if stats['total_files'] == 0:
+            recommendation = "none"
+            reason = "Directory is empty"
+        elif is_codebase_structure or code_ratio > 0.5:
+            recommendation = "index_local_codebase"
+            reason = f"High code ratio ({code_ratio:.1%}) and/or project markers found ({', '.join(stats['markers_found'][:3])})"
+        elif doc_ratio > 0.5:
+            recommendation = "add_documents_from_directory"
+            reason = f"High document ratio ({doc_ratio:.1%}) found"
+        else:
+            reason = "Mixed content: contains both code and documents"
+
+        return {
+            "path": str(dir_path),
+            "stats": {
+                "total_files": stats['total_files'] if scanned < file_limit else f"{file_limit}+",
+                "code_files": stats['code_files'],
+                "doc_files": stats['doc_files'],
+                "top_extensions": sorted(stats['extensions'].items(), key=lambda x: x[1], reverse=True)[:5]
+            },
+            "recommendation": recommendation,
+            "reason": reason
+        }
+
+    except Exception as e:
+        logger.error(f"Error inspecting directory: {e}", exc_info=True)
+        return {"error": f"Error inspecting directory: {str(e)}"}
+
+
+@mcp.tool()
 def index_local_codebase(
     directory_path: str,
     language_filter: Optional[List[str]] = None,
