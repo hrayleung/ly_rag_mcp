@@ -444,20 +444,14 @@ def query_rag(
     use_hyde: bool = False
 ) -> str:
     """
-    Retrieve relevant documents from the RAG database.
-
+    Retrieve documents from RAG.
+    
     Args:
-        question: The question/query to search for
-        similarity_top_k: Number of final documents to return (default: 6)
-        search_mode: Search strategy.
-                     - 'semantic' (default): Best for general questions, concepts, and "how-to" queries.
-                     - 'hybrid': RECOMMENDED for most technical queries. Best when searching for specific function names, error codes, IDs, or acronyms while maintaining semantic context.
-                     - 'keyword': Use only for exact string matching when semantic search fails.
-        use_rerank: Whether to use Cohere reranking (default: True). Highly recommended for accuracy.
-        use_hyde: Whether to use Hypothetical Document Embeddings (default: False). Best for short, ambiguous questions where context is missing.
-
-    Returns:
-        Formatted string with retrieved document chunks and metadata
+        question: Query string.
+        similarity_top_k: Documents to return (default: 6).
+        search_mode: 'semantic' (default, concepts), 'hybrid' (technical/ids), 'keyword' (exact).
+        use_rerank: Enable Cohere reranking (default: True).
+        use_hyde: Enable HyDE for ambiguous queries (default: False).
     """
     try:
         nodes, used_query = _retrieve_nodes(question, similarity_top_k, search_mode, use_rerank, use_hyde)
@@ -509,20 +503,14 @@ def query_rag_with_sources(
     use_hyde: bool = False
 ) -> dict:
     """
-    Query the RAG database and return source documents with full metadata.
-
+    Retrieve documents with metadata (structured).
+    
     Args:
-        question: The question to ask the RAG system
-        similarity_top_k: Number of most similar documents to retrieve
-        search_mode: Search strategy.
-                     - 'semantic' (default): Best for general questions, concepts, and "how-to" queries.
-                     - 'hybrid': RECOMMENDED for most technical queries. Best when searching for specific function names, error codes, IDs, or acronyms while maintaining semantic context.
-                     - 'keyword': Use only for exact string matching when semantic search fails.
-        use_rerank: Whether to use Cohere reranking (default: True). Highly recommended for accuracy.
-        use_hyde: Whether to use Hypothetical Document Embeddings (default: False). Best for short, ambiguous questions where context is missing.
-
-    Returns:
-        Dictionary with 'sources' and metadata
+        question: Query string.
+        similarity_top_k: Documents to return.
+        search_mode: 'semantic', 'hybrid', 'keyword'.
+        use_rerank: Enable reranking (default: True).
+        use_hyde: Enable HyDE (default: False).
     """
     try:
         nodes, used_query = _retrieve_nodes(question, similarity_top_k, search_mode, use_rerank, use_hyde)
@@ -629,15 +617,11 @@ def get_index_stats() -> dict:
 @mcp.tool()
 def add_document_from_text(text: str, metadata: dict = None) -> dict:
     """
-    Add a document from raw text to the RAG index.
-    Useful for ingesting content from chat, web scraping, or API responses.
-
+    Add raw text to index.
+    
     Args:
-        text: The text content to add
-        metadata: Optional metadata dictionary (e.g., {'source': 'chat', 'topic': 'AI'})
-
-    Returns:
-        Dictionary with success status and document ID
+        text: Content to add.
+        metadata: Optional dict.
     """
     try:
         if not text or len(text.strip()) == 0:
@@ -672,14 +656,10 @@ def add_document_from_text(text: str, metadata: dict = None) -> dict:
 @mcp.tool()
 def add_documents_from_directory(directory_path: str) -> dict:
     """
-    Ingest all documents from a specified directory into the RAG index.
-    Supports multiple file formats: txt, pdf, docx, md, csv, json.
-
+    Index all docs in directory (recursive).
+    
     Args:
-        directory_path: Absolute path to the directory containing documents
-
-    Returns:
-        Dictionary with ingestion results
+        directory_path: Absolute path.
     """
     try:
         dir_path = Path(directory_path)
@@ -732,21 +712,12 @@ def add_documents_from_directory(directory_path: str) -> dict:
 @mcp.tool()
 def crawl_website(url: str, max_depth: int = 1, max_pages: int = 10) -> dict:
     """
-    Crawl a website and add its content to the RAG index using Firecrawl.
+    Crawl website to RAG index (requires FIRECRAWL_API_KEY).
     
     Args:
-        url: The starting URL to crawl.
-        max_depth: Depth of the crawl.
-                   - 0: Scrape ONLY the specified URL (single page).
-                   - 1: Scrape the URL and direct links (default).
-                   - 2+: Crawl deeper into the site structure (use for full docs).
-        max_pages: Maximum number of pages to crawl (default: 10).
-                   - Set to 1 for single page.
-                   - Set to 50-100 for documentation sections or blogs.
-                   - Set higher (e.g., 500) for entire small sites.
-
-    Returns:
-        Dictionary with crawl results and indexing status
+        url: Starting URL.
+        max_depth: 0=single page, 1=direct links, 2+=deep.
+        max_pages: Limit pages (e.g., 1 for single, 50+ for docs).
     """
     try:
         from firecrawl import FirecrawlApp
@@ -872,12 +843,7 @@ def crawl_website(url: str, max_depth: int = 1, max_pages: int = 10) -> dict:
 
 @mcp.tool()
 def list_indexed_documents() -> dict:
-    """
-    List all documents currently in the RAG index with their metadata.
-
-    Returns:
-        Dictionary with list of documents and their metadata
-    """
+    """List sample of indexed documents with metadata."""
     try:
         # Use get_index_stats to get count without creating new ChromaDB client
         stats = get_index_stats()
@@ -938,18 +904,15 @@ def iterative_search(
     use_hyde: bool = False
 ) -> dict:
     """
-    Perform a two-phase iterative search.
-
+    Two-phase search: quick initial results + suggestions.
+    
     Args:
-        question: The question/query to search for
-        initial_top_k: Number of initial results to return (default: 3)
-        detailed_top_k: Number of results available for detailed exploration (default: 10)
-        search_mode: 'semantic' (default), 'hybrid', or 'keyword'
-        use_rerank: Whether to use Cohere reranking (default: True)
-        use_hyde: Whether to use Hypothetical Document Embeddings (default: False)
-
-    Returns:
-        Dictionary with initial results and suggestions for refinement
+        question: Query string.
+        initial_top_k: Initial results (default: 3).
+        detailed_top_k: Potential results for follow-up (default: 10).
+        search_mode: 'semantic', 'hybrid', 'keyword'.
+        use_rerank: Enable reranking.
+        use_hyde: Enable HyDE.
     """
     try:
         # Validate inputs
@@ -1045,27 +1008,14 @@ def index_github_repository(
     filter_extensions: Optional[List[str]] = None
 ) -> dict:
     """
-    Index a GitHub repository for semantic code search.
-    Clones and indexes code from a public or private GitHub repository.
-
-    Automatically uses GITHUB_TOKEN from environment variables.
-
+    Index GitHub repo (requires GITHUB_TOKEN).
+    
     Args:
-        owner: Repository owner (username or organization)
-        repo: Repository name
-        branch: Branch to index (default: "main")
-        filter_dirs: Optional list of directories to include (e.g., ["src", "lib"])
-        filter_extensions: Optional list of file extensions to include (e.g., [".py", ".js"])
-
-    Returns:
-        Dictionary with indexing results
-
-    Example:
-        index_github_repository(
-            owner="OpenBMB",
-            repo="UltraRAG",
-            branch="main"
-        )
+        owner: User/Org.
+        repo: Repo name.
+        branch: Branch (default: main).
+        filter_dirs: Directories to include.
+        filter_extensions: Extensions to include.
     """
     try:
         from llama_index.readers.github import GithubRepositoryReader, GithubClient
@@ -1153,17 +1103,10 @@ def index_github_repository(
 @mcp.tool()
 def inspect_directory(path: str) -> dict:
     """
-    Analyze a directory to determine if it contains a codebase or documents.
-    Use this BEFORE indexing to decide which tool to use.
-
+    Analyze folder to recommend 'index_local_codebase' or 'add_documents_from_directory'.
+    
     Args:
-        path: Absolute path to the directory
-
-    Returns:
-        Analysis containing file counts, types, and a recommendation:
-        - 'index_local_codebase': If it looks like a software project (has code, .git, package files)
-        - 'add_documents_from_directory': If it looks like a collection of docs (PDF, DOCX, TXT)
-        - 'ask_user': If it's empty, ambiguous, or mixed
+        path: Absolute path.
     """
     try:
         dir_path = Path(path).resolve()
@@ -1270,24 +1213,13 @@ def index_local_codebase(
     include_hidden: bool = False
 ) -> dict:
     """
-    Index a local codebase directory with code-aware processing.
-    Optimized for source code with language-specific filtering and common excludes.
-
+    Index local code with smart filtering.
+    
     Args:
-        directory_path: Absolute path to the codebase directory
-        language_filter: Optional list of languages/extensions (e.g., ["python", "javascript", ".ts"])
-        exclude_patterns: Optional list of glob patterns to exclude (e.g., ["node_modules", "*.test.js"])
-        include_hidden: Whether to include hidden files/directories (default: False)
-
-    Returns:
-        Dictionary with indexing results
-
-    Example:
-        index_local_codebase(
-            directory_path="/path/to/project",
-            language_filter=["python", "typescript"],
-            exclude_patterns=["node_modules", "__pycache__", "*.pyc"]
-        )
+        directory_path: Codebase root.
+        language_filter: Languages (e.g., ['python', '.ts']).
+        exclude_patterns: Glob patterns to ignore.
+        include_hidden: Include dotfiles (default: False).
     """
     try:
         dir_path = Path(directory_path).resolve()
@@ -1478,13 +1410,7 @@ def index_local_codebase(
 
 @mcp.tool()
 def clear_index() -> dict:
-    """
-    Clear all documents from the RAG index.
-    WARNING: This is a destructive operation!
-
-    Returns:
-        Dictionary with operation status
-    """
+    """Clear all documents (DESTRUCTIVE)."""
     try:
         global _index
 
