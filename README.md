@@ -115,7 +115,17 @@ File size limit: 300MB per file
 - `index_github_repository(...)` - Index GitHub repos
 - `index_local_codebase(...)` - Index local code
 
+### Advanced Features
+- **Multi-Project**: Isolate indexes.
+  - `create_project(name)`, `switch_project(name)`, `list_projects()`
+- **Live Indexing**: Auto-update on file save.
+  - `start_watcher(path)`, `stop_watcher()`
+- **Knowledge Graph**: Structure-aware search.
+  - `build_knowledge_graph(path)`, `query_graph(question)`
+- **Smart Splitting**: Automatically uses AST (tree-sitter) for code and sentence splitting for docs.
+
 ### Management
+- `inspect_directory(path)` - Analyze folder content
 - `get_index_stats()` - Index statistics
 - `get_cache_stats()` - Cache performance metrics
 - `list_indexed_documents()` - List all documents
@@ -132,27 +142,31 @@ File size limit: 300MB per file
 ## Architecture
 
 ```
-Query → HyDE (optional) → Hybrid Search (Vector + BM25)
-                                         ↓
-Query → Embedding → Vector Search → Dynamic candidates
-                                         ↓
-                            Cohere Rerank v3.5 (optional)
-                                         ↓
-                            Top N documents (LLM decides: 1-50) → MCP Client
+Query → HyDE? → Hybrid Search? → Graph Search?
+                                      ↓
+Code → AST Splitter ──┐           Top Candidates
+Docs → Text Splitter ─┴→ Vector       ↓
+                          Store → Reranker → LLM
 ```
 
 ## Search Strategies
 
-### Hybrid Search (Best for Technical Terms)
-Use `search_mode='hybrid'` when searching for specific acronyms, error codes, or exact phrases that semantic search might miss.
+### Hybrid Search (Technical Terms)
+`search_mode='hybrid'` combines vector + keyword search. Best for error codes and acronyms.
 
-### HyDE (Best for "How-To")
-Use `use_hyde=True` for conceptual questions where the answer might look very different from the question. The system will generate a hypothetical answer and search for that.
+### Knowledge Graph (Reasoning)
+`query_graph("How does X relate to Y?")` uses the graph index to find structural dependencies.
 
-### Web Crawling
-1. Get an API key from [Firecrawl](https://firecrawl.dev)
-2. Set `export FIRECRAWL_API_KEY='your-key'`
-3. Call `crawl_website("https://docs.example.com")`
+### Live Indexing (Dev Mode)
+1. `start_watcher("/path/to/code")`
+2. Edit code in your IDE.
+3. RAG index updates automatically in background.
+
+### Workspaces
+1. `create_project("backend")`
+2. `switch_project("backend")`
+3. Index backend files.
+4. Switch to "frontend" to keep contexts clean.
 
 ## Reranking
 
