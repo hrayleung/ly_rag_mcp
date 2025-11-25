@@ -14,7 +14,7 @@ import re
 import logging
 from pathlib import Path
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Set
 from functools import wraps
 import time
 import nest_asyncio
@@ -494,6 +494,22 @@ def _save_project_manifest(project: str, manifest: dict) -> None:
     manifest["updated_at"] = datetime.now().isoformat()
     with manifest_path.open("w", encoding="utf-8") as manifest_file:
         json.dump(manifest, manifest_file, indent=2, sort_keys=True)
+
+
+def _infer_candidate_roots(index) -> List[str]:
+    """Gather possible source directories from indexed metadata."""
+    candidate_keys = ("sync_root", "source_directory", "codebase_root")
+    candidates: Set[str] = set()
+    try:
+        for node in index.docstore.docs.values():
+            metadata = getattr(node, "metadata", {}) or {}
+            for key in candidate_keys:
+                value = metadata.get(key)
+                if isinstance(value, str) and value:
+                    candidates.add(value)
+    except Exception as exc:
+        logger.debug(f"Failed to scan metadata for candidate roots: {exc}")
+    return sorted(candidates)
 
 
 def _analyze_query_signals(question: str) -> dict:
@@ -1825,23 +1841,38 @@ def index_modified_files(
 
         manifest = _load_project_manifest(resolved_project)
         roots = manifest.setdefault("roots", {})
+        dir_path: Optional[Path] = None
         if path:
             dir_path = Path(path).resolve()
         else:
-            if not roots:
-                return {
-                    "error": "path_required",
-                    "message": "No prior directories tracked for this project. Provide a path to initialize tracking.",
-                    "project": resolved_project
-                }
-            if len(roots) > 1:
-                return {
-                    "error": "path_ambiguous",
-                    "message": "Multiple directories tracked for this project. Specify one explicitly.",
-                    "tracked_directories": sorted(roots.keys()),
-                    "project": resolved_project
-                }
-            dir_path = Path(next(iter(roots.keys()))).resolve()
+            if roots:
+                if len(roots) == 1:
+                    dir_path = Path(next(iter(roots.keys()))).resolve()
+                else:
+                    return {
+                        "error": "path_ambiguous",
+                        "message": "Multiple directories tracked for this project. Specify one explicitly.",
+                        "tracked_directories": sorted(roots.keys()),
+                        "project": resolved_project
+                    }
+            else:
+                candidate_dirs = _infer_candidate_roots(index)
+                existing_candidates = [c for c in candidate_dirs if Path(c).exists()]
+                if len(existing_candidates) == 1:
+                    dir_path = Path(existing_candidates[0]).resolve()
+                elif existing_candidates:
+                    return {
+                        "error": "path_ambiguous",
+                        "message": "Multiple candidate directories found in existing metadata. Provide the desired path explicitly.",
+                        "tracked_directories": sorted(existing_candidates),
+                        "project": resolved_project
+                    }
+                else:
+                    return {
+                        "error": "path_required",
+                        "message": "No prior directories tracked for this project. Provide a path to initialize tracking.",
+                        "project": resolved_project
+                    }
 
         if not dir_path.exists():
             return {"error": f"Path not found: {dir_path}"}
