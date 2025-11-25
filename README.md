@@ -110,7 +110,7 @@ File size limit: 300MB per file
 ### Ingestion
 - `inspect_directory(path)` - Analyze folder content
 - `index_hybrid_folder(path, project)` - **NEW** Index mixed content (Code + Docs)
-- `index_modified_files(path, project)` - Sync only new/changed files since last scan
+- `index_modified_files(path?, project)` - Sync only new/changed files since last scan (reuses last tracked path if `path` omitted)
 - `crawl_website(url, max_depth=1, max_pages=10)` - Crawl websites
 - `add_document_from_text(text, metadata)` - Add text dynamically
 - `add_documents_from_directory(path, project)` - Bulk import

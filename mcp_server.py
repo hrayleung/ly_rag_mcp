@@ -1800,7 +1800,7 @@ def index_hybrid_folder(
 
 @mcp.tool()
 def index_modified_files(
-    path: str,
+    path: Optional[str] = None,
     project: Optional[str] = None
 ) -> dict:
     """
@@ -1808,21 +1808,14 @@ def index_modified_files(
     Tracks file mtimes in a per-project manifest to avoid reprocessing unchanged files.
     
     Args:
-        path: Directory path to monitor.
+        path: Directory path to monitor. If omitted, uses the last tracked path for the project.
         project: Target project/workspace to store ingested data.
     """
     try:
-        dir_path = Path(path).resolve()
-
-        if not dir_path.exists():
-            return {"error": f"Path not found: {path}"}
-        if not dir_path.is_dir():
-            return {"error": f"Path is not a directory: {path}"}
-
         project_error, resolved_project = _require_project_selection(
             "index_modified_files",
             project,
-            suggested=dir_path.name
+            suggested=Path(path).name if path else None
         )
         if project_error:
             return project_error
@@ -1832,6 +1825,29 @@ def index_modified_files(
 
         manifest = _load_project_manifest(resolved_project)
         roots = manifest.setdefault("roots", {})
+        if path:
+            dir_path = Path(path).resolve()
+        else:
+            if not roots:
+                return {
+                    "error": "path_required",
+                    "message": "No prior directories tracked for this project. Provide a path to initialize tracking.",
+                    "project": resolved_project
+                }
+            if len(roots) > 1:
+                return {
+                    "error": "path_ambiguous",
+                    "message": "Multiple directories tracked for this project. Specify one explicitly.",
+                    "tracked_directories": sorted(roots.keys()),
+                    "project": resolved_project
+                }
+            dir_path = Path(next(iter(roots.keys()))).resolve()
+
+        if not dir_path.exists():
+            return {"error": f"Path not found: {dir_path}"}
+        if not dir_path.is_dir():
+            return {"error": f"Path is not a directory: {dir_path}"}
+
         root_key = str(dir_path)
         root_entry = roots.get(root_key, {})
 
