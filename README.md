@@ -119,8 +119,6 @@ File size limit: 300MB per file
 ### Advanced Features
 - **Multi-Project**: Isolate indexes.
   - `create_project(name)`, `switch_project(name)`, `list_projects()`
-- **Live Indexing**: Auto-update on file save.
-  - `start_watcher(path)`, `stop_watcher()`
 - **Smart Splitting**: Automatically uses AST (tree-sitter) for code and sentence splitting for docs.
 
 ### Management
@@ -152,11 +150,6 @@ Docs → Text Splitter ┴→ Vector       ↓
 
 ### Hybrid Search (Technical Terms)
 `search_mode='hybrid'` combines vector + keyword search. Best for error codes and acronyms.
-
-### Live Indexing (Dev Mode)
-1. `start_watcher("/path/to/code")`
-2. Edit code in your IDE.
-3. RAG index updates automatically in background.
 
 ### Workspaces
 1. `create_project("backend")`

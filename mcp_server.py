@@ -402,14 +402,6 @@ def switch_project(name: str) -> dict:
         return {"error": str(e)}
 
 
-# --- Live Indexing (Watch Mode) ---
-
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
-import threading
-
-_observer = None
-
 # Language mapping for CodeSplitter
 CODE_LANG_MAP = {
     '.py': 'python',
@@ -449,97 +441,6 @@ def get_splitter_for_file(file_path: str):
         chunk_size=1024,
         chunk_overlap=200,
     )
-
-class RAGEventHandler(FileSystemEventHandler):
-    """Handles file system events for auto-indexing."""
-    def __init__(self, index, splitter_func):
-        self.index = index
-        self.get_splitter = splitter_func
-        self.processing_lock = threading.Lock()
-
-    def on_modified(self, event):
-        if event.is_directory or event.src_path.endswith(('.tmp', '.swp', '.git')):
-            return
-            
-        # Debounce/Lock
-        if self.processing_lock.locked(): return
-        
-        with self.processing_lock:
-            try:
-                path = Path(event.src_path)
-                logger.info(f"File modified: {path}. Re-indexing...")
-                
-                # Create document
-                if not path.exists(): return
-
-                allowed, reason = _should_ingest_file(path)
-                if not allowed:
-                    logger.info(f"Skipping {path} (reason: {reason})")
-                    return
-                
-                documents = SimpleDirectoryReader(input_files=[str(path)]).load_data()
-                if not documents: return
-                
-                # Process
-                splitter = self.get_splitter(str(path))
-                nodes = splitter.get_nodes_from_documents(documents)
-                
-                # Update Index (naive: insert new, doesn't delete old nodes yet)
-                self.index.insert_nodes(nodes)
-                self.index.storage_context.persist(persist_dir=str(STORAGE_PATH / _current_project))
-                logger.info(f"Updated index for {path.name}")
-                
-            except Exception as e:
-                logger.error(f"Watch handler error: {e}")
-
-    def on_created(self, event):
-        self.on_modified(event)
-
-@mcp.tool()
-def start_watcher(path: str = ".") -> dict:
-    """
-    Start background watcher for live indexing.
-    Updates RAG index automatically when files change.
-    """
-    global _observer, _index
-    
-    try:
-        if _observer and _observer.is_alive():
-            return {"error": "Watcher already running. Stop it first."}
-            
-        dir_path = Path(path).resolve()
-        if not dir_path.exists(): return {"error": "Path not found"}
-        
-        # Ensure index is loaded
-        if _index is None:
-            get_index()
-            
-        event_handler = RAGEventHandler(_index, get_splitter_for_file)
-        _observer = Observer()
-        _observer.schedule(event_handler, str(dir_path), recursive=True)
-        _observer.start()
-        
-        return {
-            "success": True,
-            "message": f"Started watcher on {dir_path}",
-            "mode": "background_thread"
-        }
-    except Exception as e:
-        return {"error": f"Failed to start watcher: {e}"}
-
-@mcp.tool()
-def stop_watcher() -> dict:
-    """Stop the background file watcher."""
-    global _observer
-    try:
-        if _observer:
-            _observer.stop()
-            _observer.join()
-            _observer = None
-            return {"success": True, "message": "Watcher stopped"}
-        return {"error": "No watcher running"}
-    except Exception as e:
-        return {"error": str(e)}
 
 
 def get_bm25_retriever(index):
