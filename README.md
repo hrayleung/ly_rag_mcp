@@ -21,8 +21,12 @@ cd ly_rag_mcp
 conda create -n rag-env python=3.10
 conda activate rag-env
 
+# Core dependencies
 pip install llama-index llama-index-embeddings-openai llama-index-vector-stores-chroma
 pip install llama-index-postprocessor-cohere-rerank chromadb fastmcp
+
+# New features (Hybrid Search & Web Crawling)
+pip install rank-bm25 llama-index-retrievers-bm25 firecrawl-py
 ```
 
 ## Quick Start
@@ -31,7 +35,8 @@ pip install llama-index-postprocessor-cohere-rerank chromadb fastmcp
 
 ```bash
 export OPENAI_API_KEY='your-openai-api-key'
-export COHERE_API_KEY='your-cohere-api-key'  # Optional
+export COHERE_API_KEY='your-cohere-api-key'     # Optional: For Reranking
+export FIRECRAWL_API_KEY='your-firecrawl-key'   # Optional: For Web Crawling
 ```
 
 ### 2. Index Documents
@@ -57,7 +62,8 @@ Add to your MCP client configuration:
       "cwd": "/path/to/ly_rag_mcp",
       "env": {
         "OPENAI_API_KEY": "your-openai-key",
-        "COHERE_API_KEY": "your-cohere-key"
+        "COHERE_API_KEY": "your-cohere-key",
+        "FIRECRAWL_API_KEY": "your-firecrawl-key"
       }
     }
   }
