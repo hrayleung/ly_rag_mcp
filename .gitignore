@@ -39,3 +39,4 @@ data/
 # MCP server config (contains API keys)
 .mcp.json
 mcp.json
+CLAUDE.md
