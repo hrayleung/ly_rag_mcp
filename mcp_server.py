@@ -34,157 +34,82 @@ from llama_index.core import (
     SimpleDirectoryReader,
     Document,
     Settings,
-    KnowledgeGraphIndex,
 )
-from llama_index.core.graph_stores import SimpleGraphStore
+from llama_index.core.node_parser import SentenceSplitter, CodeSplitter
+from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.llms.openai import OpenAI
+from llama_index.postprocessor.cohere_rerank import CohereRerank
+from llama_index.retrievers.bm25 import BM25Retriever
+from llama_index.core.retrievers import QueryFusionRetriever
+import chromadb
+from llama_index.vector_stores.chroma import ChromaVectorStore
 
-# ... (existing imports)
+# Initialize FastMCP server
+mcp = FastMCP("LlamaIndex RAG")
+
+# Get absolute paths (important for MCP server execution)
+SCRIPT_DIR = Path(__file__).parent.absolute()
+STORAGE_PATH = SCRIPT_DIR / "storage"
+CHROMA_PATH = STORAGE_PATH / "chroma_db"
 
 # Global variables to cache
 _index = None
-_graph_index = None
 _chroma_client = None
 _chroma_collection = None
 _reranker = None
 _bm25_retriever = None
 _doc_count_at_bm25_build = 0
 
-# ... (rest of globals)
+# Project Management
+DEFAULT_PROJECT = "rag_collection"
+_current_project = DEFAULT_PROJECT
 
-def get_graph_index(collection_name: str = None):
-    """Get or create Knowledge Graph Index (cached)."""
-    global _graph_index, _current_project
-    
-    target_collection = collection_name or _current_project
-    project_storage_path = STORAGE_PATH / target_collection
-    
-    # If cached and matching, return
-    # (Simplification: assume graph index matches current project if loaded)
-    if _graph_index is not None: 
-        return _graph_index
-
-    graph_store = SimpleGraphStore()
-    storage_context = StorageContext.from_defaults(
-        graph_store=graph_store,
-        persist_dir=str(project_storage_path)
-    )
-    
-    # Try to load existing graph
-    try:
-        _graph_index = load_index_from_storage(storage_context, index_id="graph_index")
-        logger.info(f"Loaded Knowledge Graph for {target_collection}")
-    except:
-        logger.info(f"No existing Knowledge Graph found for {target_collection}")
-        # We don't create a new one here automatically because it's expensive to build empty
-        # We'll let the build tool handle creation
-        return None
-        
-    return _graph_index
-
-# ... (get_index and other helpers)
-
-@mcp.tool()
-def build_knowledge_graph(path: str, reset: bool = False) -> dict:
-    """
-    Build a Knowledge Graph from documents in a directory.
-    WARNING: This is slow and consumes many LLM tokens (extracts entities/triplets).
-    
-    Args:
-        path: Directory to process.
-        reset: If True, discards existing graph for this project.
-    """
-    global _graph_index, _current_project
-    
-    try:
-        dir_path = Path(path).resolve()
-        if not dir_path.exists():
-            return {"error": "Path not found"}
-            
-        project_storage_path = STORAGE_PATH / _current_project
-        project_storage_path.mkdir(parents=True, exist_ok=True)
-
-        # Load docs
-        documents = SimpleDirectoryReader(str(dir_path), recursive=True).load_data()
-        
-        # Setup graph store
-        graph_store = SimpleGraphStore()
-        storage_context = StorageContext.from_defaults(graph_store=graph_store)
-        
-        # Configure extraction LLM (needs to be capable)
-        # We use the default LLM configured in LlamaIndex (OpenAI usually)
-        
-        logger.info(f"Building Knowledge Graph from {len(documents)} documents...")
-        
-        _graph_index = KnowledgeGraphIndex.from_documents(
-            documents,
-            max_triplets_per_chunk=2,
-            storage_context=storage_context,
-            show_progress=True,
-            include_embeddings=True
-        )
-        
-        # Persist with a specific ID so we can load it separately from VectorIndex
-        _graph_index.set_index_id("graph_index")
-        _graph_index.storage_context.persist(persist_dir=str(project_storage_path))
-        
-        return {
-            "success": True,
-            "message": f"Built Knowledge Graph with {len(documents)} documents.",
-            "triplets": "Extracted"
-        }
-    except Exception as e:
-        return {"error": f"Graph build failed: {str(e)}"}
-
-@mcp.tool()
-def query_graph(question: str) -> str:
-    """
-    Query the Knowledge Graph for relationships and structure.
-    Good for: "How is X related to Y?", "Trace the dependencies of Z".
-    """
-    try:
-        index = get_graph_index()
-        if index is None:
-            return "No Knowledge Graph found. Run build_knowledge_graph() first."
-            
-        query_engine = index.as_query_engine(
-            include_text=True,
-            response_mode="tree_summarize"
-        )
-        response = query_engine.query(question)
-        return str(response)
-    except Exception as e:
-        return f"Graph query error: {str(e)}"
+# Cache performance metrics
+_cache_stats = {
+    "index_loads": 0,
+    "index_cache_hits": 0,
+    "reranker_loads": 0,
+    "reranker_cache_hits": 0,
+    "chroma_loads": 0,
+    "chroma_cache_hits": 0,
+    "bm25_builds": 0,
+    "bm25_cache_hits": 0
+}
 
 # File upload constraints
 MAX_FILE_SIZE_MB = 300
-ALLOWED_EXTENSIONS = [
-    # Documents
-    '.txt', '.pdf', '.docx', '.md', '.epub',
-    # Presentations
-    '.ppt', '.pptx', '.pptm',
-    # Data
-    '.csv', '.json', '.xml',
-    # Code & Notebooks
-    '.ipynb', '.html',
-    # Images (can extract text via OCR if needed)
-    '.jpg', '.jpeg', '.png',
-    # Other
-    '.hwp', '.mbox',
-    # Code files
-    '.py', '.js', '.ts', '.jsx', '.tsx',
-    '.java', '.cpp', '.c', '.h', '.hpp',
-    '.cs', '.go', '.rs', '.rb', '.php',
-    '.swift', '.kt', '.scala', '.r',
-    '.sh', '.bash', '.zsh',
-    '.sql', '.yaml', '.yml', '.toml',
-    '.dockerfile', '.makefile',
-    '.vue', '.svelte', '.astro'
+
+# Global Constants
+SUPPORTED_CODE_EXTS = {
+    '.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.cpp', '.c', '.h', '.hpp',
+    '.cs', '.go', '.rs', '.rb', '.php', '.swift', '.kt', '.scala', '.r',
+    '.sh', '.bash', '.zsh', '.sql', '.yaml', '.yml', '.toml', '.dockerfile',
+    '.makefile', '.vue', '.svelte', '.astro', '.html', '.css'
+}
+
+SUPPORTED_DOC_EXTS = {
+    '.txt', '.pdf', '.docx', '.doc', '.md', '.epub',
+    '.ppt', '.pptx', '.pptm', '.xls', '.xlsx', '.csv', '.json', '.xml',
+    '.ipynb', '.hwp', '.mbox', '.rtf'
+}
+
+ALLOWED_EXTENSIONS = list(SUPPORTED_CODE_EXTS | SUPPORTED_DOC_EXTS | {'.jpg', '.jpeg', '.png'})
+
+DEFAULT_EXCLUDES = [
+    "node_modules", "__pycache__", ".git", ".svn", ".hg",
+    "venv", "env", ".venv", ".env",
+    "build", "dist", "target", "out",
+    ".idea", ".vscode", ".vs",
+    "*.pyc", "*.pyo", "*.so", "*.dylib", "*.dll",
+    ".DS_Store", "Thumbs.db"
 ]
 
-# Get absolute paths (important for MCP server execution)
-SCRIPT_DIR = Path(__file__).parent.absolute()
-STORAGE_PATH = SCRIPT_DIR / "storage"
-CHROMA_PATH = STORAGE_PATH / "chroma_db"
+CODE_INDICATORS = {
+    'files': {'package.json', 'requirements.txt', 'Cargo.toml', 'go.mod', 'pom.xml', 'build.gradle', 'Makefile', 'CMakeLists.txt'},
+    'dirs': {'.git', '.vscode', '.idea', 'src', 'lib', 'include', 'node_modules', 'venv'}
+}
+
+# ... (get_index and other helpers)
 
 # Configuration constants
 MIN_TOP_K = 1
@@ -250,39 +175,52 @@ def log_performance(func):
 
 
 def get_chroma_client(collection_name: str = None):
-    """Get or create ChromaDB client (cached)."""
+    """
+    Get ChromaDB client for a specific project.
+    ENFORCES STRICT ISOLATION: Each project gets its own 'chroma_db' folder.
+    """
     global _chroma_client, _chroma_collection, _cache_stats, _current_project
 
-    target_collection = collection_name or _current_project
+    target_project = collection_name or _current_project
+    
+    # Path: ./storage/{project_name}/chroma_db
+    project_storage = STORAGE_PATH / target_project
+    chroma_path = project_storage / "chroma_db"
 
-    # If we have a client and the collection matches, return it
-    if _chroma_client is not None and _chroma_collection is not None:
-        if _chroma_collection.name == target_collection:
+    # Check if we can reuse the cached client
+    # We reuse ONLY if the target project matches the current loaded one
+    if _chroma_client is not None:
+        # Chroma client doesn't expose its path easily, so we track it via _current_project
+        # If the request is for the same project we currently have loaded:
+        if target_project == _current_project:
             _cache_stats["chroma_cache_hits"] += 1
-            logger.debug(f"ChromaDB client: cache hit for {target_collection}")
             return _chroma_client, _chroma_collection
 
     _cache_stats["chroma_loads"] += 1
-    logger.debug(f"ChromaDB client: switching to {target_collection}")
+    logger.info(f"Switching ChromaDB to project: {target_project} at {chroma_path}")
 
     # Ensure directories exist
-    STORAGE_PATH.mkdir(parents=True, exist_ok=True)
-    CHROMA_PATH.mkdir(parents=True, exist_ok=True)
+    chroma_path.mkdir(parents=True, exist_ok=True)
 
-    # Configure ChromaDB with settings for MCP environment
+    # Configure ChromaDB
     chroma_settings = chromadb.Settings(
         allow_reset=True,
         anonymized_telemetry=False
     )
 
-    # Re-use client if possible, only get new collection
-    if _chroma_client is None:
-        _chroma_client = chromadb.PersistentClient(
-            path=str(CHROMA_PATH),
-            settings=chroma_settings
-        )
+    # Initialize NEW client for this specific project path
+    _chroma_client = chromadb.PersistentClient(
+        path=str(chroma_path),
+        settings=chroma_settings
+    )
     
-    _chroma_collection = _chroma_client.get_or_create_collection(target_collection)
+    # In this isolated mode, the collection name can just be "default" or the project name.
+    # Let's use "default" since the folder separates them, but keeping project name is safer for debug.
+    _chroma_collection = _chroma_client.get_or_create_collection(target_project)
+    
+    # Update current project tracker if we just switched the global client
+    if collection_name is None:
+        _current_project = target_project
 
     return _chroma_client, _chroma_collection
 
@@ -315,29 +253,20 @@ def get_reranker():
 
 
 def get_index(collection_name: str = None):
-    """Load the RAG index from storage (cached). Creates new index if doesn't exist."""
+    """Load the RAG index from storage (cached)."""
     global _index, _cache_stats, _current_project
 
-    target_collection = collection_name or _current_project
+    target_project = collection_name or _current_project
 
-    # We need to check if the current loaded index matches the target collection
-    # Since VectorStoreIndex wraps the vector store, we check the underlying store's collection
-    if _index is not None:
-        try:
-            # Access internal vector store collection name if possible
-            # Or simple heuristic: if we just switched projects, _index should have been reset
-            # For now, we rely on the caller or switch_project to reset _index if needed.
-            # But to be safe, let's verify.
-            current_store_collection = _index.vector_store._collection.name
-            if current_store_collection == target_collection:
-                _cache_stats["index_cache_hits"] += 1
-                logger.debug(f"Index: cache hit for {target_collection}")
-                return _index
-        except:
-            pass # Fall through to reload if check fails
+    # Smart Cache Check:
+    # If we have an index loaded AND it belongs to the requested project
+    if _index is not None and _current_project == target_project:
+        _cache_stats["index_cache_hits"] += 1
+        logger.debug(f"Index: cache hit for {target_project}")
+        return _index
 
     _cache_stats["index_loads"] += 1
-    logger.debug(f"Index: loading for {target_collection}")
+    logger.info(f"Index: loading for {target_project}")
 
     # Check for OpenAI API key
     if not os.getenv("OPENAI_API_KEY"):
@@ -347,30 +276,18 @@ def get_index(collection_name: str = None):
         )
 
     # Configure LlamaIndex settings
-    # Only need embedding model - MCP client's LLM will generate answers
     Settings.embed_model = OpenAIEmbedding(model="text-embedding-3-large")
+    Settings.text_splitter = SentenceSplitter(chunk_size=1024, chunk_overlap=200)
 
-    # Configure text splitter (must match build_index.py settings)
-    Settings.text_splitter = SentenceSplitter(
-        chunk_size=1024,
-        chunk_overlap=200,
-    )
-
-    # Get cached ChromaDB client and collection
-    chroma_client, chroma_collection = get_chroma_client(target_collection)
+    # Get isolated ChromaDB client
+    chroma_client, chroma_collection = get_chroma_client(target_project)
 
     # Create vector store
     vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
 
-    # Load or create index
-    # Note: LlamaIndex usually persists "docstore" and "index_store" to disk.
-    # If we switch projects, we might be sharing the same docstore.json for different collections?
-    # ideally we should separate persistence dirs per project.
-    # For now, we will use a subdirectory for each project's metadata if possible, 
-    # OR we rely on the fact that VectorStoreIndex can rebuild from VectorStore if docstore is empty.
-    # But better: use a project-specific persist dir.
-    
-    project_storage_path = STORAGE_PATH / target_collection
+    # Define Persistence Paths
+    # Format: ./storage/{project_name}/
+    project_storage_path = STORAGE_PATH / target_project
     project_storage_path.mkdir(parents=True, exist_ok=True)
     
     docstore_path = project_storage_path / "docstore.json"
@@ -388,16 +305,132 @@ def get_index(collection_name: str = None):
         _index = VectorStoreIndex([], storage_context=storage_context)
         _index.storage_context.persist(persist_dir=str(project_storage_path))
 
+    # Update global state
+    _current_project = target_project
     return _index
 
+
+# --- Project Management Tools ---
+
+@mcp.tool()
+def create_project(name: str) -> dict:
+    """Create a new isolated project (workspace)."""
+    try:
+        safe_name = "".join(c for c in name if c.isalnum() or c in ('_', '-'))
+        if not safe_name:
+            return {"error": "Invalid project name"}
+            
+        # Check if directory exists
+        project_path = STORAGE_PATH / safe_name
+        if project_path.exists():
+             return {"error": f"Project '{safe_name}' already exists at {project_path}"}
+        
+        # Bootstrap the project by initializing its storage
+        # This creates ./storage/{name}/chroma_db
+        logger.info(f"Creating project workspace: {safe_name}")
+        get_chroma_client(safe_name)
+        
+        return {"success": True, "message": f"Created project '{safe_name}'. Use switch_project('{safe_name}') to activate."}
+    except Exception as e:
+        return {"error": str(e)}
+
+@mcp.tool()
+def list_projects() -> dict:
+    """List all available projects (directories in storage)."""
+    try:
+        if not STORAGE_PATH.exists():
+            return {"projects": [], "current_project": _current_project, "count": 0}
+            
+        # List subdirectories in storage/
+        projects = []
+        for item in STORAGE_PATH.iterdir():
+            if item.is_dir() and not item.name.startswith('.'):
+                # Filter out legacy 'chroma_db' folder if it exists at root from old version
+                if item.name == "chroma_db": continue 
+                projects.append(item.name)
+                
+        return {
+            "projects": sorted(projects),
+            "current_project": _current_project,
+            "count": len(projects)
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@mcp.tool()
+def switch_project(name: str) -> dict:
+    """Switch the active workspace."""
+    global _current_project, _index, _bm25_retriever, _chroma_client, _chroma_collection
+    try:
+        project_path = STORAGE_PATH / name
+        if not project_path.exists() or not project_path.is_dir():
+            return {"error": f"Project '{name}' not found. Use list_projects() to see available ones."}
+            
+        logger.info(f"Switching to project: {name}")
+        _current_project = name
+        
+        # Reset caches to force reload
+        _index = None
+        _bm25_retriever = None
+        # Force reload of chroma client for this project
+        _chroma_client = None 
+        _chroma_collection = None
+        
+        # Pre-load the new index
+        get_index(name)
+        
+        return {"success": True, "message": f"Switched to project '{name}'"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# --- Live Indexing (Watch Mode) ---
 
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import threading
 
-# ... (existing globals)
-
 _observer = None
+
+# Language mapping for CodeSplitter
+CODE_LANG_MAP = {
+    '.py': 'python',
+    '.js': 'javascript',
+    '.ts': 'typescript',
+    '.tsx': 'typescript',
+    '.java': 'java',
+    '.cpp': 'cpp',
+    '.cc': 'cpp',
+    '.cs': 'c_sharp',
+    '.go': 'go',
+    '.rs': 'rust',
+    '.rb': 'ruby',
+    '.html': 'html',
+    '.css': 'css',
+    '.php': 'php',
+    '.yaml': 'yaml',
+    '.yml': 'yaml',
+    '.json': 'json'
+}
+
+def get_splitter_for_file(file_path: str):
+    """Return optimal splitter based on file extension."""
+    ext = Path(file_path).suffix.lower()
+    if ext in CODE_LANG_MAP:
+        try:
+            return CodeSplitter(
+                language=CODE_LANG_MAP[ext],
+                chunk_lines=40,
+                chunk_lines_overlap=15,
+                max_chars=1500,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to init CodeSplitter for {ext}: {e}. Fallback to text.")
+            
+    return SentenceSplitter(
+        chunk_size=1024,
+        chunk_overlap=200,
+    )
 
 class RAGEventHandler(FileSystemEventHandler):
     """Handles file system events for auto-indexing."""
@@ -429,8 +462,6 @@ class RAGEventHandler(FileSystemEventHandler):
                 nodes = splitter.get_nodes_from_documents(documents)
                 
                 # Update Index (naive: insert new, doesn't delete old nodes yet)
-                # For a real prod system we need doc_id management. 
-                # Here we just append, relying on reranker to pick best.
                 self.index.insert_nodes(nodes)
                 self.index.storage_context.persist(persist_dir=str(STORAGE_PATH / _current_project))
                 logger.info(f"Updated index for {path.name}")
@@ -487,61 +518,6 @@ def stop_watcher() -> dict:
     except Exception as e:
         return {"error": str(e)}
 
-# ... (rest of file: create_project, list_projects, etc.)
-    """Create a new isolated project (workspace)."""
-    try:
-        safe_name = "".join(c for c in name if c.isalnum() or c in ('_', '-'))
-        if not safe_name:
-            return {"error": "Invalid project name"}
-            
-        # Check if exists
-        client = chromadb.PersistentClient(path=str(CHROMA_PATH))
-        collections = client.list_collections()
-        if any(c.name == safe_name for c in collections):
-            return {"error": f"Project '{safe_name}' already exists"}
-            
-        # Create it
-        client.create_collection(safe_name)
-        return {"success": True, "message": f"Created project '{safe_name}'. Use switch_project('{safe_name}') to activate."}
-    except Exception as e:
-        return {"error": str(e)}
-
-@mcp.tool()
-def list_projects() -> dict:
-    """List all available projects."""
-    try:
-        client = chromadb.PersistentClient(path=str(CHROMA_PATH))
-        collections = client.list_collections()
-        names = [c.name for c in collections]
-        return {
-            "projects": names,
-            "current_project": _current_project,
-            "count": len(names)
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-@mcp.tool()
-def switch_project(name: str) -> dict:
-    """Switch the active workspace."""
-    global _current_project, _index, _bm25_retriever
-    try:
-        client = chromadb.PersistentClient(path=str(CHROMA_PATH))
-        collections = client.list_collections()
-        if not any(c.name == name for c in collections):
-            return {"error": f"Project '{name}' not found. Use list_projects() to see available ones."}
-            
-        _current_project = name
-        
-        # Reset caches to force reload
-        _index = None
-        _bm25_retriever = None
-        get_index(name) # Pre-load
-        
-        return {"success": True, "message": f"Switched to project '{name}'"}
-    except Exception as e:
-        return {"error": str(e)}
-
 
 def get_bm25_retriever(index):
     """Get or create BM25 retriever (cached)."""
@@ -560,7 +536,6 @@ def get_bm25_retriever(index):
                 get_chroma_client()
             
             # Fetch all documents from Chroma
-            # limit=None usually fetches all, or we might need a large number
             result = _chroma_collection.get()
             
             if result and result['documents']:
@@ -822,12 +797,7 @@ def query_rag_with_sources(
 
 @mcp.tool()
 def get_cache_stats() -> dict:
-    """
-    Get cache performance metrics to understand caching efficiency.
-
-    Returns:
-        Dictionary with cache hit/miss statistics
-    """
+    """Get cache performance metrics."""
     global _cache_stats
 
     total_index = _cache_stats["index_loads"] + _cache_stats["index_cache_hits"]
@@ -860,12 +830,7 @@ def get_cache_stats() -> dict:
 
 @mcp.tool()
 def get_index_stats() -> dict:
-    """
-    Get statistics about the RAG index.
-
-    Returns:
-        Dictionary with index statistics
-    """
+    """Get RAG index statistics."""
     try:
         if not STORAGE_PATH.exists():
             return {"error": "Index not found. Run build_index.py first."}
@@ -1381,6 +1346,120 @@ def index_github_repository(
 
 
 @mcp.tool()
+def index_hybrid_folder(
+    path: str,
+    exclude_patterns: Optional[List[str]] = None
+) -> dict:
+    """
+    Index a folder containing mixed content (Code + Documents).
+    Smartly filters out noise (node_modules, .git) while including both
+    source code (.py, .ts) and documentation (.md, .pdf).
+    
+    Args:
+        path: Directory path.
+        exclude_patterns: Additional glob patterns to ignore.
+    """
+    try:
+        dir_path = Path(path).resolve()
+        
+        if not dir_path.exists():
+            return {"error": f"Path not found: {path}"}
+        if not dir_path.is_dir():
+            return {"error": f"Path is not a directory: {path}"}
+
+        logger.info(f"Hybrid indexing: {dir_path}")
+
+        # Prepare Excludes
+        user_excludes = exclude_patterns or []
+        all_excludes = set(DEFAULT_EXCLUDES + user_excludes)
+        
+        # Allowed Extensions (Code + Docs)
+        valid_exts = SUPPORTED_CODE_EXTS | SUPPORTED_DOC_EXTS
+
+        files_to_index = []
+        skipped_count = 0
+
+        for item in dir_path.rglob('*'):
+            # Skip hidden files/dirs
+            if any(part.startswith('.') for part in item.parts):
+                continue
+            
+            if not item.is_file():
+                continue
+
+            # Check exclusion patterns
+            relative_path = item.relative_to(dir_path)
+            excluded = False
+            for pattern in all_excludes:
+                if pattern in str(relative_path):
+                    excluded = True
+                    break
+                if '*' in pattern and relative_path.match(pattern):
+                    excluded = True
+                    break
+            
+            if excluded:
+                skipped_count += 1
+                continue
+
+            # Check extension
+            if item.suffix.lower() in valid_exts:
+                files_to_index.append(item)
+            else:
+                skipped_count += 1
+
+        if not files_to_index:
+            return {"error": "No valid files found to index"}
+
+        logger.info(f"Found {len(files_to_index)} files (skipped {skipped_count})")
+
+        # Load documents
+        documents = SimpleDirectoryReader(
+            input_files=[str(f) for f in files_to_index],
+            errors='ignore'
+        ).load_data()
+
+        # Add metadata
+        for doc in documents:
+            doc.metadata['source'] = 'hybrid_folder'
+            doc.metadata['codebase_root'] = str(dir_path)
+            doc.metadata['ingested_at'] = datetime.now().isoformat()
+            
+            # Tag content type
+            ext = Path(doc.metadata.get('file_path', '')).suffix.lower()
+            if ext in SUPPORTED_CODE_EXTS:
+                doc.metadata['content_type'] = 'code'
+            elif ext in SUPPORTED_DOC_EXTS:
+                doc.metadata['content_type'] = 'document'
+
+        # SMART Chunking
+        index = get_index()
+        nodes = []
+        for doc in documents:
+            file_path = doc.metadata.get('file_path', '')
+            splitter = get_splitter_for_file(file_path)
+            doc_nodes = splitter.get_nodes_from_documents([doc])
+            nodes.extend(doc_nodes)
+
+        logger.info(f"Created {len(nodes)} chunks from {len(documents)} files")
+        index.insert_nodes(nodes, show_progress=True)
+        
+        index.storage_context.persist(persist_dir=str(STORAGE_PATH / _current_project))
+
+        return {
+            "success": True,
+            "message": f"Indexed {len(documents)} mixed files ({len(nodes)} chunks)",
+            "files_indexed": len(documents),
+            "chunks_created": len(nodes),
+            "root": str(dir_path)
+        }
+
+    except Exception as e:
+        logger.error(f"Error in hybrid indexing: {e}", exc_info=True)
+        return {"error": f"Hybrid indexing failed: {str(e)}"}
+
+
+@mcp.tool()
 def inspect_directory(path: str) -> dict:
     """
     Analyze folder to recommend 'index_local_codebase' or 'add_documents_from_directory'.
@@ -1395,16 +1474,6 @@ def inspect_directory(path: str) -> dict:
             return {"error": f"Path not found: {path}"}
         if not dir_path.is_dir():
             return {"error": f"Path is not a directory: {path}"}
-
-        # Code markers
-        CODE_INDICATORS = {
-            'files': {'package.json', 'requirements.txt', 'Cargo.toml', 'go.mod', 'pom.xml', 'build.gradle', 'Makefile', 'CMakeLists.txt'},
-            'dirs': {'.git', '.vscode', '.idea', 'src', 'lib', 'include', 'node_modules', 'venv'}
-        }
-        
-        # Extensions
-        CODE_EXTS = {'.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.cpp', '.c', '.h', '.cs', '.go', '.rs', '.rb', '.php', '.swift', '.kt', '.sql', '.html', '.css', '.sh'}
-        DOC_EXTS = {'.pdf', '.docx', '.doc', '.ppt', '.pptx', '.xls', '.xlsx', '.csv', '.epub', '.md', '.txt', '.rtf'}
 
         # Stats
         stats = {
@@ -1438,9 +1507,9 @@ def inspect_directory(path: str) -> dict:
                 stats["total_files"] += 1
                 stats["extensions"][ext] = stats["extensions"].get(ext, 0) + 1
                 
-                if ext in CODE_EXTS:
+                if ext in SUPPORTED_CODE_EXTS:
                     stats["code_files"] += 1
-                elif ext in DOC_EXTS:
+                elif ext in SUPPORTED_DOC_EXTS:
                     stats["doc_files"] += 1
                 
                 scanned += 1

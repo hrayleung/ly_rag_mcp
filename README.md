@@ -108,8 +108,9 @@ File size limit: 300MB per file
 - `iterative_search(question, initial_top_k=3, detailed_top_k=10)` - Two-phase search
 
 ### Ingestion
-- `inspect_directory(path)` - **NEW** Analyze folder to decide between Codebase vs Documents
-- `crawl_website(url, max_depth=1, max_pages=10)` - **NEW** Crawl and index websites (requires `FIRECRAWL_API_KEY`)
+- `inspect_directory(path)` - Analyze folder content
+- `index_hybrid_folder(path)` - **NEW** Index mixed content (Code + Docs)
+- `crawl_website(url, max_depth=1, max_pages=10)` - Crawl websites
 - `add_document_from_text(text, metadata)` - Add text dynamically
 - `add_documents_from_directory(path)` - Bulk import
 - `index_github_repository(...)` - Index GitHub repos
@@ -120,8 +121,6 @@ File size limit: 300MB per file
   - `create_project(name)`, `switch_project(name)`, `list_projects()`
 - **Live Indexing**: Auto-update on file save.
   - `start_watcher(path)`, `stop_watcher()`
-- **Knowledge Graph**: Structure-aware search.
-  - `build_knowledge_graph(path)`, `query_graph(question)`
 - **Smart Splitting**: Automatically uses AST (tree-sitter) for code and sentence splitting for docs.
 
 ### Management
@@ -142,10 +141,10 @@ File size limit: 300MB per file
 ## Architecture
 
 ```
-Query → HyDE? → Hybrid Search? → Graph Search?
-                                      ↓
-Code → AST Splitter ──┐           Top Candidates
-Docs → Text Splitter ─┴→ Vector       ↓
+Query → HyDE? → Hybrid Search?
+                     ↓
+Code → AST Splitter ─┐           Top Candidates
+Docs → Text Splitter ┴→ Vector       ↓
                           Store → Reranker → LLM
 ```
 
@@ -153,9 +152,6 @@ Docs → Text Splitter ─┴→ Vector       ↓
 
 ### Hybrid Search (Technical Terms)
 `search_mode='hybrid'` combines vector + keyword search. Best for error codes and acronyms.
-
-### Knowledge Graph (Reasoning)
-`query_graph("How does X relate to Y?")` uses the graph index to find structural dependencies.
 
 ### Live Indexing (Dev Mode)
 1. `start_watcher("/path/to/code")`
