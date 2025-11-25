@@ -129,6 +129,31 @@ def _should_ingest_file(path: Path):
         return False, "stat_error"
     return True, ""
 
+
+def _prepend_filename_to_document(doc: Document) -> Document:
+    """Prefix document text with its filename to improve retrieval on titles."""
+    try:
+        file_path = (
+            doc.metadata.get("file_path")
+            or doc.metadata.get("relative_path")
+            or doc.metadata.get("source")
+        )
+        if not file_path:
+            return doc
+
+        file_name = Path(file_path).name or str(file_path)
+        prefix = f"Filename: {file_name}\n\n"
+
+        text = getattr(doc, "text", "")
+        if text and not text.startswith(prefix):
+            doc.text = prefix + text
+
+        doc.metadata.setdefault("filename", file_name)
+        return doc
+    except Exception as exc:
+        logger.debug(f"Unable to prepend filename for document: {exc}")
+        return doc
+
 # ... (get_index and other helpers)
 
 # Configuration constants
@@ -496,7 +521,7 @@ def _save_project_manifest(project: str, manifest: dict) -> None:
         json.dump(manifest, manifest_file, indent=2, sort_keys=True)
 
 
-def _infer_candidate_roots(index) -> List[str]:
+def _infer_candidate_roots(index, project: str) -> List[str]:
     """Gather possible source directories from indexed metadata."""
     candidate_keys = ("sync_root", "source_directory", "codebase_root", "root_path")
     candidates: Set[str] = set()
@@ -517,7 +542,7 @@ def _infer_candidate_roots(index) -> List[str]:
     # Fallback to Chroma metadata if needed
     if not candidates:
         try:
-            _, collection = get_chroma_client()
+            _, collection = get_chroma_client(project)
             result = collection.get(include=["metadatas"])
             for meta in result.get("metadatas") or []:
                 if not isinstance(meta, dict):
@@ -530,6 +555,64 @@ def _infer_candidate_roots(index) -> List[str]:
             logger.debug(f"Failed to scan Chroma metadata for candidate roots: {exc}")
 
     return sorted(candidates)
+
+
+def _get_existing_node_count(index, project: str) -> int:
+    """Estimate how many nodes already exist for this project."""
+    count = 0
+    try:
+        docstore = getattr(index, "docstore", None)
+        docs = getattr(docstore, "docs", {}) or {}
+        count = len(docs)
+    except Exception:
+        count = 0
+
+    if count:
+        return count
+
+    try:
+        _, collection = get_chroma_client(project)
+        count = collection.count()
+    except Exception:
+        count = 0
+
+    return count
+
+
+def _parse_project_directives(question: str, projects: List[str]) -> tuple[Set[str], Set[str]]:
+    """Extract project inclusion/exclusion directives from the query."""
+    normalized = question.lower()
+    normalized = normalized.replace("'", " ").replace('"', " ")
+    normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
+    includes: Set[str] = set()
+    excludes: Set[str] = set()
+
+    for project in projects:
+        pl = project.lower()
+        if pl not in normalized:
+            continue
+
+        # Exclusion phrases
+        if re.search(rf"(ignore|excluding|except|without|skip|omit)[^\.]*\b{re.escape(pl)}\b", normalized):
+            excludes.add(project)
+            continue
+        if re.search(rf"\bfrom\s+the\s+{re.escape(pl)}\s+project\b", normalized) and "ignore" in normalized:
+            excludes.add(project)
+            continue
+
+        # Inclusion phrases
+        if re.search(rf"(only|just|specifically|focus(?:\s+on)?)\s+(the\s+)?{re.escape(pl)}", normalized):
+            includes.add(project)
+            continue
+        if re.search(rf"{re.escape(pl)}\s+(only|alone|exclusively)", normalized):
+            includes.add(project)
+            continue
+        if re.search(rf"(?:project|workspace)\s+{re.escape(pl)}", normalized) and "ignore" not in normalized:
+            includes.add(project)
+
+    # If a project is both included and excluded, exclusion wins
+    includes -= excludes
+    return includes, excludes
 
 
 def _analyze_query_signals(question: str) -> dict:
@@ -623,6 +706,7 @@ def _retrieve_nodes_for_index(
     similarity_top_k: int,
     search_mode: str,
     use_rerank: bool,
+    project_name: str,
 ) -> tuple[List, bool]:
     """Run retrieval against a specific index."""
     # Determine candidate count (fetch more if reranking)
@@ -633,16 +717,30 @@ def _retrieve_nodes_for_index(
             MIN_RERANK_CANDIDATES
         )
 
+    available_nodes = _get_existing_node_count(index, project_name)
+    if available_nodes > 0:
+        candidate_top_k = min(initial_top_k, available_nodes)
+        if candidate_top_k == 0:
+            candidate_top_k = min(similarity_top_k, available_nodes)
+    else:
+        candidate_top_k = initial_top_k
+
+    if available_nodes > 0 and candidate_top_k == 0:
+        candidate_top_k = available_nodes
+
+    if candidate_top_k <= 0:
+        candidate_top_k = min(initial_top_k, similarity_top_k)
+
     # Select Retriever
     if search_mode == "hybrid":
-        vector_retriever = index.as_retriever(similarity_top_k=initial_top_k)
+        vector_retriever = index.as_retriever(similarity_top_k=candidate_top_k)
         bm25_retriever = get_bm25_retriever(index)
 
         if bm25_retriever:
-            bm25_retriever.similarity_top_k = initial_top_k
+            bm25_retriever.similarity_top_k = candidate_top_k
             retriever = QueryFusionRetriever(
                 [vector_retriever, bm25_retriever],
-                similarity_top_k=initial_top_k,
+                similarity_top_k=candidate_top_k,
                 num_queries=1,  # Simple RRF
                 mode="reciprocal_rerank",
                 use_async=False,
@@ -655,14 +753,14 @@ def _retrieve_nodes_for_index(
     elif search_mode == "keyword":
         bm25_retriever = get_bm25_retriever(index)
         if bm25_retriever:
-            bm25_retriever.similarity_top_k = initial_top_k
+            bm25_retriever.similarity_top_k = candidate_top_k
             retriever = bm25_retriever
         else:
             logger.warning("BM25 retriever creation failed, falling back to semantic")
-            retriever = index.as_retriever(similarity_top_k=initial_top_k)
+            retriever = index.as_retriever(similarity_top_k=candidate_top_k)
 
     else:  # semantic (default)
-        retriever = index.as_retriever(similarity_top_k=initial_top_k)
+        retriever = index.as_retriever(similarity_top_k=candidate_top_k)
 
     # Retrieve
     nodes = retriever.retrieve(search_query)
@@ -673,10 +771,10 @@ def _retrieve_nodes_for_index(
 
     if apply_rerank:
         nodes = reranker.postprocess_nodes(nodes, query_str=question)
-        nodes = nodes[:similarity_top_k]
+        nodes = nodes[:min(similarity_top_k, len(nodes))]
         rerank_used = True
     else:
-        nodes = nodes[:similarity_top_k]
+        nodes = nodes[:min(similarity_top_k, len(nodes))]
 
     return nodes, rerank_used
 
@@ -892,15 +990,33 @@ def _retrieve_nodes(
 
     inferred_project = _infer_project_from_text(question)
 
+    available_projects = _discover_projects_on_disk()
+    includes, excludes = _parse_project_directives(question, available_projects)
+
     candidate_projects: List[str] = []
     if inferred_project:
         candidate_projects.append(inferred_project)
     if _current_project not in candidate_projects:
         candidate_projects.append(_current_project)
 
-    for project in _discover_projects_on_disk():
+    for project in available_projects:
         if project not in candidate_projects:
             candidate_projects.append(project)
+
+    if includes:
+        filtered = [p for p in candidate_projects if p in includes]
+        if not filtered:
+            filtered = [p for p in includes if p in available_projects]
+        if filtered:
+            candidate_projects = filtered
+            logger.info(f"Project directive include={includes} applied to retrieval.")
+
+    if excludes:
+        candidate_projects = [p for p in candidate_projects if p not in excludes]
+        logger.info(f"Project directive exclude={excludes} applied to retrieval.")
+
+    if not candidate_projects:
+        candidate_projects = [p for p in available_projects if p not in excludes] or available_projects
 
     original_project = _current_project
     best_project = None
@@ -929,6 +1045,7 @@ def _retrieve_nodes(
                 similarity_top_k=similarity_top_k,
                 search_mode=effective_mode,
                 use_rerank=use_rerank,
+                project_name=project,
             )
 
             if nodes:
@@ -1288,6 +1405,7 @@ def add_documents_from_directory(directory_path: str, project: Optional[str] = N
         nodes = []
         
         for doc in documents:
+            doc = _prepend_filename_to_document(doc)
             # Determine splitter per document based on file path
             file_path = doc.metadata.get('file_path', '')
             if not file_path and 'source_directory' in doc.metadata: 
@@ -1678,6 +1796,7 @@ def index_github_repository(
         text_splitter = Settings.text_splitter
         nodes = []
         for doc in documents:
+            doc = _prepend_filename_to_document(doc)
             doc_nodes = text_splitter.get_nodes_from_documents([doc])
             nodes.extend(doc_nodes)
 
@@ -1812,6 +1931,7 @@ def index_hybrid_folder(
         nodes = []
         for doc in documents:
             file_path = doc.metadata.get('file_path', '')
+            doc = _prepend_filename_to_document(doc)
             splitter = get_splitter_for_file(file_path)
             doc_nodes = splitter.get_nodes_from_documents([doc])
             nodes.extend(doc_nodes)
@@ -1857,7 +1977,7 @@ def index_modified_files(
             return project_error
 
         index = get_index(resolved_project)
-        existing_doc_count = len(index.docstore.docs)
+        existing_doc_count = _get_existing_node_count(index, resolved_project)
 
         manifest = _load_project_manifest(resolved_project)
         roots = manifest.setdefault("roots", {})
@@ -1876,7 +1996,7 @@ def index_modified_files(
                         "project": resolved_project
                     }
             else:
-                candidate_dirs = _infer_candidate_roots(index)
+                candidate_dirs = _infer_candidate_roots(index, resolved_project)
                 existing_candidates = [c for c in candidate_dirs if Path(c).exists()]
                 if len(existing_candidates) == 1:
                     dir_path = Path(existing_candidates[0]).resolve()
@@ -2049,6 +2169,7 @@ def index_modified_files(
             doc.metadata['ingested_via'] = 'index_modified_files'
             doc.metadata['ingested_at'] = datetime.now().isoformat()
 
+            doc = _prepend_filename_to_document(doc)
             splitter = get_splitter_for_file(file_path_str or "")
             doc_nodes = splitter.get_nodes_from_documents([doc])
             nodes.extend(doc_nodes)
@@ -2371,6 +2492,7 @@ def index_local_codebase(
         nodes = []
         for doc in documents:
             file_path = doc.metadata.get('file_path', '')
+            doc = _prepend_filename_to_document(doc)
             splitter = get_splitter_for_file(file_path)
             doc_nodes = splitter.get_nodes_from_documents([doc])
             nodes.extend(doc_nodes)
