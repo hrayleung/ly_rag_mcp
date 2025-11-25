@@ -37,7 +37,10 @@ from llama_index.core import (
 )
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.llms.openai import OpenAI
 from llama_index.postprocessor.cohere_rerank import CohereRerank
+from llama_index.retrievers.bm25 import BM25Retriever
+from llama_index.core.retrievers import QueryFusionRetriever
 import chromadb
 from llama_index.vector_stores.chroma import ChromaVectorStore
 
@@ -49,6 +52,8 @@ _index = None
 _chroma_client = None
 _chroma_collection = None
 _reranker = None
+_bm25_retriever = None
+_doc_count_at_bm25_build = 0
 
 # Cache performance metrics
 _cache_stats = {
@@ -57,7 +62,9 @@ _cache_stats = {
     "reranker_loads": 0,
     "reranker_cache_hits": 0,
     "chroma_loads": 0,
-    "chroma_cache_hits": 0
+    "chroma_cache_hits": 0,
+    "bm25_builds": 0,
+    "bm25_cache_hits": 0
 }
 
 # File upload constraints
@@ -265,65 +272,208 @@ def get_index():
     return _index
 
 
+def get_bm25_retriever(index):
+    """Get or create BM25 retriever (cached)."""
+    global _bm25_retriever, _doc_count_at_bm25_build, _cache_stats, _chroma_collection
+
+    # Try to get nodes from docstore
+    nodes = list(index.docstore.docs.values())
+    current_doc_count = len(nodes)
+
+    # Fallback: If docstore is empty, try retrieving from ChromaDB directly
+    if current_doc_count == 0:
+        logger.warning("Docstore is empty. Attempting to load nodes from ChromaDB for BM25...")
+        try:
+            # Ensure we have the collection
+            if _chroma_collection is None:
+                get_chroma_client()
+            
+            # Fetch all documents from Chroma
+            # limit=None usually fetches all, or we might need a large number
+            result = _chroma_collection.get()
+            
+            if result and result['documents']:
+                from llama_index.core.schema import TextNode
+                
+                chroma_docs = result['documents']
+                chroma_metadatas = result['metadatas']
+                chroma_ids = result['ids']
+                
+                nodes = []
+                for i, text in enumerate(chroma_docs):
+                    if text: # Skip empty text
+                        node = TextNode(
+                            text=text,
+                            id_=chroma_ids[i],
+                            metadata=chroma_metadatas[i] if chroma_metadatas else {}
+                        )
+                        nodes.append(node)
+                
+                current_doc_count = len(nodes)
+                logger.info(f"Recovered {current_doc_count} nodes from ChromaDB")
+        except Exception as e:
+            logger.error(f"Failed to load from ChromaDB: {e}")
+
+    if current_doc_count == 0:
+        logger.warning("No documents available for BM25. Hybrid/Keyword search will fail.")
+        return None
+
+    if _bm25_retriever is not None and _doc_count_at_bm25_build == current_doc_count:
+        _cache_stats["bm25_cache_hits"] += 1
+        logger.debug("BM25 Retriever: cache hit")
+        return _bm25_retriever
+
+    _cache_stats["bm25_builds"] += 1
+    logger.info(f"Building BM25 Retriever with {current_doc_count} nodes...")
+
+    start_time = time.time()
+    
+    _bm25_retriever = BM25Retriever.from_defaults(
+        nodes=nodes,
+        similarity_top_k=DEFAULT_TOP_K,
+        stemmer=None,
+        language="english"
+    )
+    _doc_count_at_bm25_build = current_doc_count
+
+    logger.info(f"Built BM25 Retriever in {time.time() - start_time:.3f}s")
+    return _bm25_retriever
+
+
+def _generate_hyde_query(question: str) -> str:
+    """Generate a hypothetical answer for the question using OpenAI."""
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if not openai_key:
+        logger.warning("OPENAI_API_KEY missing, skipping HyDE")
+        return question
+
+    try:
+        # Use a lightweight model for HyDE if possible, but standard is fine
+        llm = OpenAI(model="gpt-3.5-turbo", api_key=openai_key)
+        prompt = (
+            "Please write a brief passage to answer the question.\n"
+            "Question: {question}\n"
+            "Passage:"
+        )
+        response = llm.complete(prompt.format(question=question))
+        logger.debug(f"HyDE generated: {str(response)[:100]}...")
+        return str(response)
+    except Exception as e:
+        logger.error(f"HyDE generation failed: {e}")
+        return question
+
+
+def _retrieve_nodes(
+    question: str,
+    similarity_top_k: int,
+    search_mode: str,
+    use_rerank: bool,
+    use_hyde: bool
+):
+    """Common retrieval logic for RAG tools."""
+    # Validation
+    question = validate_query(question)
+    similarity_top_k = validate_top_k(similarity_top_k)
+
+    # HyDE transformation
+    search_query = question
+    if use_hyde:
+        search_query = _generate_hyde_query(question)
+
+    index = get_index()
+
+    # Determine candidate count (fetch more if reranking)
+    initial_top_k = similarity_top_k
+    if use_rerank:
+        initial_top_k = max(similarity_top_k * RERANK_CANDIDATE_MULTIPLIER, MIN_RERANK_CANDIDATES)
+
+    # Select Retriever
+    if search_mode == "hybrid":
+        vector_retriever = index.as_retriever(similarity_top_k=initial_top_k)
+        bm25_retriever = get_bm25_retriever(index)
+        
+        if bm25_retriever:
+            bm25_retriever.similarity_top_k = initial_top_k
+            retriever = QueryFusionRetriever(
+                [vector_retriever, bm25_retriever],
+                similarity_top_k=initial_top_k,
+                num_queries=1,  # Simple RRF
+                mode="reciprocal_rerank",
+                use_async=False,
+                verbose=True
+            )
+        else:
+            logger.warning("BM25 retriever creation failed, falling back to semantic")
+            retriever = vector_retriever
+
+    elif search_mode == "keyword":
+        bm25_retriever = get_bm25_retriever(index)
+        if bm25_retriever:
+            bm25_retriever.similarity_top_k = initial_top_k
+            retriever = bm25_retriever
+        else:
+            logger.warning("BM25 retriever creation failed, falling back to semantic")
+            retriever = index.as_retriever(similarity_top_k=initial_top_k)
+
+    else:  # semantic (default)
+        retriever = index.as_retriever(similarity_top_k=initial_top_k)
+
+    # Retrieve
+    nodes = retriever.retrieve(search_query)
+    
+    # Rerank
+    reranker = get_reranker()
+    if use_rerank and reranker and nodes:
+        # Rerank against ORIGINAL question for relevance
+        nodes = reranker.postprocess_nodes(nodes, query_str=question)
+        nodes = nodes[:similarity_top_k]
+    elif not use_rerank:
+        # Just slice if no reranker
+        nodes = nodes[:similarity_top_k]
+
+    return nodes, search_query
+
+
 @mcp.tool()
 @log_performance
-def query_rag(question: str, similarity_top_k: int = DEFAULT_TOP_K, use_rerank: bool = True) -> str:
+def query_rag(
+    question: str, 
+    similarity_top_k: int = DEFAULT_TOP_K, 
+    search_mode: str = "semantic",
+    use_rerank: bool = True,
+    use_hyde: bool = False
+) -> str:
     """
-    Retrieve relevant documents from the RAG database with optional reranking.
-    Returns raw text chunks for the MCP client's LLM to process.
-    This saves costs by using your client's LLM instead of OpenAI's LLM.
+    Retrieve relevant documents from the RAG database.
 
     Args:
         question: The question/query to search for
-        similarity_top_k: Number of final documents to return (default: 6, range: 1-50)
-        use_rerank: Whether to use Cohere reranking for better accuracy (default: True)
+        similarity_top_k: Number of final documents to return (default: 6)
+        search_mode: Search strategy.
+                     - 'semantic' (default): Best for general questions, concepts, and "how-to" queries.
+                     - 'hybrid': RECOMMENDED for most technical queries. Best when searching for specific function names, error codes, IDs, or acronyms while maintaining semantic context.
+                     - 'keyword': Use only for exact string matching when semantic search fails.
+        use_rerank: Whether to use Cohere reranking (default: True). Highly recommended for accuracy.
+        use_hyde: Whether to use Hypothetical Document Embeddings (default: False). Best for short, ambiguous questions where context is missing.
 
     Returns:
         Formatted string with retrieved document chunks and metadata
     """
     try:
-        # Validate inputs
-        question = validate_query(question)
-        similarity_top_k = validate_top_k(similarity_top_k)
+        nodes, used_query = _retrieve_nodes(question, similarity_top_k, search_mode, use_rerank, use_hyde)
 
-        logger.debug(f"Query: '{question[:100]}...', top_k={similarity_top_k}, rerank={use_rerank}")
-
-        index = get_index()
-        reranker = get_reranker() if use_rerank else None
-
-        # If using reranker, retrieve more candidates for reranking
-        # Use 2x similarity_top_k or MIN_RERANK_CANDIDATES, whichever is larger
-        if reranker:
-            initial_top_k = max(similarity_top_k * RERANK_CANDIDATE_MULTIPLIER, MIN_RERANK_CANDIDATES)
-            logger.debug(f"Using reranker: retrieving {initial_top_k} candidates for top {similarity_top_k}")
-        else:
-            initial_top_k = similarity_top_k
-            logger.debug(f"No reranker: retrieving {initial_top_k} documents directly")
-
-        retriever = index.as_retriever(similarity_top_k=initial_top_k)
-        nodes = retriever.retrieve(question)
-
-        logger.debug(f"Retrieved {len(nodes)} initial candidates")
+        logger.debug(f"Retrieved {len(nodes)} nodes")
 
         if not nodes:
             logger.info("No relevant documents found")
             return "No relevant documents found in the knowledge base."
 
-        # Apply reranking if available
-        if reranker:
-            rerank_start = time.time()
-            # Rerank all candidates
-            nodes = reranker.postprocess_nodes(nodes, query_str=question)
-            # Manually slice to get desired top_k
-            nodes = nodes[:similarity_top_k]
-            rerank_time = time.time() - rerank_start
-            logger.debug(f"Reranking took {rerank_time:.3f}s, returned {len(nodes)} nodes")
-            rerank_used = " (reranked with Cohere Rerank v3.5)"
-        else:
-            rerank_used = ""
-
-        # Format the retrieved chunks for the client's LLM
-        result = f"Found {len(nodes)} relevant document(s){rerank_used}:\n\n"
+        # Format the retrieved chunks
+        rerank_label = " + Cohere Rerank" if use_rerank and get_reranker() else ""
+        hyde_label = " + HyDE" if use_hyde else ""
+        mode_label = f" ({search_mode}{hyde_label}{rerank_label})"
+        
+        result = f"Found {len(nodes)} relevant document(s){mode_label}:\n\n"
 
         for i, node in enumerate(nodes, 1):
             result += f"--- Document {i} ---\n"
@@ -339,7 +489,6 @@ def query_rag(question: str, similarity_top_k: int = DEFAULT_TOP_K, use_rerank: 
 
             result += "\n"
 
-        logger.info(f"Successfully retrieved and formatted {len(nodes)} documents")
         return result
 
     except ValueError as e:
@@ -352,33 +501,31 @@ def query_rag(question: str, similarity_top_k: int = DEFAULT_TOP_K, use_rerank: 
 
 @mcp.tool()
 @log_performance
-def query_rag_with_sources(question: str, similarity_top_k: int = DEFAULT_TOP_K, use_rerank: bool = True) -> dict:
+def query_rag_with_sources(
+    question: str, 
+    similarity_top_k: int = DEFAULT_TOP_K, 
+    search_mode: str = "semantic",
+    use_rerank: bool = True,
+    use_hyde: bool = False
+) -> dict:
     """
     Query the RAG database and return source documents with full metadata.
-    Similar to query_rag but returns structured data instead of formatted text.
 
     Args:
         question: The question to ask the RAG system
-        similarity_top_k: Number of most similar documents to retrieve (default: 6, range: 1-50)
-        use_rerank: Whether to use Cohere reranking for better accuracy (default: True)
+        similarity_top_k: Number of most similar documents to retrieve
+        search_mode: Search strategy.
+                     - 'semantic' (default): Best for general questions, concepts, and "how-to" queries.
+                     - 'hybrid': RECOMMENDED for most technical queries. Best when searching for specific function names, error codes, IDs, or acronyms while maintaining semantic context.
+                     - 'keyword': Use only for exact string matching when semantic search fails.
+        use_rerank: Whether to use Cohere reranking (default: True). Highly recommended for accuracy.
+        use_hyde: Whether to use Hypothetical Document Embeddings (default: False). Best for short, ambiguous questions where context is missing.
 
     Returns:
         Dictionary with 'sources' and metadata
     """
     try:
-        # Validate inputs
-        question = validate_query(question)
-        similarity_top_k = validate_top_k(similarity_top_k)
-
-        logger.debug(f"Query with sources: '{question[:100]}...', top_k={similarity_top_k}")
-
-        index = get_index()
-        reranker = get_reranker() if use_rerank else None
-
-        # If using reranker, retrieve more candidates for reranking
-        initial_top_k = max(similarity_top_k * RERANK_CANDIDATE_MULTIPLIER, MIN_RERANK_CANDIDATES) if reranker else similarity_top_k
-        retriever = index.as_retriever(similarity_top_k=initial_top_k)
-        nodes = retriever.retrieve(question)
+        nodes, used_query = _retrieve_nodes(question, similarity_top_k, search_mode, use_rerank, use_hyde)
 
         if not nodes:
             logger.info("No relevant documents found")
@@ -386,13 +533,6 @@ def query_rag_with_sources(question: str, similarity_top_k: int = DEFAULT_TOP_K,
                 "sources": [],
                 "message": "No relevant documents found"
             }
-
-        # Apply reranking if available
-        if reranker:
-            nodes = reranker.postprocess_nodes(nodes, query_str=question)
-            # Manually slice to get desired top_k
-            nodes = nodes[:similarity_top_k]
-            logger.debug(f"After reranking: {len(nodes)} nodes")
 
         sources = []
         for node in nodes:
@@ -408,8 +548,10 @@ def query_rag_with_sources(question: str, similarity_top_k: int = DEFAULT_TOP_K,
         return {
             "sources": sources,
             "total_found": len(sources),
-            "reranked": reranker is not None,
-            "rerank_model": "rerank-v3.5" if reranker else None
+            "search_mode": search_mode,
+            "reranked": use_rerank and get_reranker() is not None,
+            "used_hyde": use_hyde,
+            "generated_query": used_query if use_hyde else None
         }
     except ValueError as e:
         logger.error(f"Validation error: {e}")
@@ -588,6 +730,147 @@ def add_documents_from_directory(directory_path: str) -> dict:
 
 
 @mcp.tool()
+def crawl_website(url: str, max_depth: int = 1, max_pages: int = 10) -> dict:
+    """
+    Crawl a website and add its content to the RAG index using Firecrawl.
+    
+    Args:
+        url: The starting URL to crawl.
+        max_depth: Depth of the crawl.
+                   - 0: Scrape ONLY the specified URL (single page).
+                   - 1: Scrape the URL and direct links (default).
+                   - 2+: Crawl deeper into the site structure (use for full docs).
+        max_pages: Maximum number of pages to crawl (default: 10).
+                   - Set to 1 for single page.
+                   - Set to 50-100 for documentation sections or blogs.
+                   - Set higher (e.g., 500) for entire small sites.
+
+    Returns:
+        Dictionary with crawl results and indexing status
+    """
+    try:
+        from firecrawl import FirecrawlApp
+
+        api_key = os.getenv("FIRECRAWL_API_KEY")
+        if not api_key:
+            return {
+                "error": "FIRECRAWL_API_KEY not found",
+                "suggestion": "Set FIRECRAWL_API_KEY environment variable"
+            }
+
+        if not url.startswith("http"):
+            return {"error": "Invalid URL. Must start with http:// or https://"}
+
+        logger.info(f"Crawling {url} (depth={max_depth}, pages={max_pages})")
+
+        app = FirecrawlApp(api_key=api_key)
+
+        logger.info("Initiating crawl...")
+        
+        # Firecrawl v2 SDK 'crawl' is synchronous and takes kwargs
+        try:
+            crawl_result = app.crawl(
+                url,
+                limit=max_pages,
+                max_discovery_depth=max_depth,
+                scrape_options={'formats': ['markdown']}
+            )
+        except Exception as e:
+            return {"error": f"Firecrawl API error: {str(e)}"}
+        
+        # Extract pages from result
+        # Result is typically a CrawlJob object with a .data attribute (list of items)
+        # or a dict depending on exact version/response
+        pages = []
+        if hasattr(crawl_result, 'data'):
+            pages = crawl_result.data
+        elif isinstance(crawl_result, dict) and 'data' in crawl_result:
+            pages = crawl_result['data']
+        else:
+            # Maybe it's the list directly?
+            # Or maybe we need to fetch status if it didn't wait? 
+            # help(crawl) said "wait for it to complete"
+            logger.warning(f"Unexpected crawl result type: {type(crawl_result)}")
+            if isinstance(crawl_result, list):
+                pages = crawl_result
+            else:
+                return {"error": f"Unexpected response structure: {str(crawl_result)[:100]}"}
+
+        if not pages:
+            return {"error": "No pages found"}
+
+        # Convert to Documents
+        documents = []
+        for page in pages:
+            # Handle object or dict access
+            if isinstance(page, dict):
+                text = page.get('markdown') or page.get('text')
+                metadata = page.get('metadata', {})
+                source = page.get('source', url)
+            else:
+                # Assume object
+                text = getattr(page, 'markdown', None) or getattr(page, 'text', None)
+                metadata = getattr(page, 'metadata', {})
+                source = getattr(page, 'source', url)
+
+            if not text:
+                continue
+                
+            # Safely convert metadata to dict
+            metadata_dict = {}
+            if isinstance(metadata, dict):
+                metadata_dict = metadata
+            elif hasattr(metadata, 'model_dump'): # Pydantic v2
+                metadata_dict = metadata.model_dump()
+            elif hasattr(metadata, 'dict'): # Pydantic v1
+                metadata_dict = metadata.dict()
+            elif hasattr(metadata, '__dict__'):
+                metadata_dict = metadata.__dict__
+                
+            # Ensure metadata is flat/clean for Chroma
+            clean_metadata = {}
+            if metadata_dict:
+                for k, v in metadata_dict.items():
+                    if isinstance(v, (str, int, float, bool)):
+                        clean_metadata[k] = v
+                    else:
+                        clean_metadata[k] = str(v)
+            
+            clean_metadata['source'] = source
+            clean_metadata['crawled_at'] = datetime.now().isoformat()
+            clean_metadata['crawled_via'] = 'firecrawl'
+            
+            doc = Document(text=text, metadata=clean_metadata)
+            documents.append(doc)
+
+        if not documents:
+            return {"error": "No valid content extracted from pages"}
+
+        # Index
+        index = get_index()
+        text_splitter = Settings.text_splitter
+        nodes = []
+        for doc in documents:
+            nodes.extend(text_splitter.get_nodes_from_documents([doc]))
+            
+        index.insert_nodes(nodes)
+        index.storage_context.persist(persist_dir=str(STORAGE_PATH))
+
+        return {
+            "success": True,
+            "message": f"Successfully crawled and indexed {len(documents)} pages from {url}",
+            "pages_crawled": len(documents),
+            "chunks_created": len(nodes)
+        }
+
+    except ImportError:
+        return {"error": "firecrawl-py not installed"}
+    except Exception as e:
+        logger.error(f"Error crawling website: {e}", exc_info=True)
+        return {"error": f"Error crawling website: {str(e)}"}
+
+
+@mcp.tool()
 def list_indexed_documents() -> dict:
     """
     List all documents currently in the RAG index with their metadata.
@@ -646,26 +929,24 @@ def list_indexed_documents() -> dict:
 
 @mcp.tool()
 @log_performance
-def iterative_search(question: str, initial_top_k: int = 3, detailed_top_k: int = 10) -> dict:
+def iterative_search(
+    question: str, 
+    initial_top_k: int = 3, 
+    detailed_top_k: int = 10,
+    search_mode: str = "semantic",
+    use_rerank: bool = True,
+    use_hyde: bool = False
+) -> dict:
     """
-    Perform a two-phase iterative search: first get a small set of highly relevant results,
-    then optionally retrieve more for deeper exploration.
-
-    This tool encourages multi-round search patterns by:
-    1. Returning initial focused results (default 3)
-    2. Providing metadata to help decide if more context is needed
-    3. Suggesting if a follow-up search with more results would be beneficial
-
-    The MCP client's LLM can then decide whether to:
-    - Use the initial results if they're sufficient
-    - Request more results by calling query_rag() with higher similarity_top_k
-    - Refine the question and search again
-    - Search for specific aspects mentioned in the initial results
+    Perform a two-phase iterative search.
 
     Args:
         question: The question/query to search for
-        initial_top_k: Number of initial results to return (default: 3, recommended: 2-5)
+        initial_top_k: Number of initial results to return (default: 3)
         detailed_top_k: Number of results available for detailed exploration (default: 10)
+        search_mode: 'semantic' (default), 'hybrid', or 'keyword'
+        use_rerank: Whether to use Cohere reranking (default: True)
+        use_hyde: Whether to use Hypothetical Document Embeddings (default: False)
 
     Returns:
         Dictionary with initial results and suggestions for refinement
@@ -676,17 +957,17 @@ def iterative_search(question: str, initial_top_k: int = 3, detailed_top_k: int 
         initial_top_k = validate_top_k(initial_top_k)
         detailed_top_k = validate_top_k(detailed_top_k)
 
-        logger.debug(f"Iterative search: '{question[:100]}...', initial={initial_top_k}, detailed={detailed_top_k}")
+        logger.debug(f"Iterative search: '{question[:100]}...', initial={initial_top_k}")
 
-        index = get_index()
-        reranker = get_reranker()
-
-        # Get initial focused results
-        candidate_count = max(initial_top_k * RERANK_CANDIDATE_MULTIPLIER, MIN_RERANK_CANDIDATES)
-        initial_retriever = index.as_retriever(similarity_top_k=candidate_count)
-        initial_nodes = initial_retriever.retrieve(question)
-
-        logger.debug(f"Retrieved {len(initial_nodes)} candidates for iterative search")
+        # Use shared retrieval logic
+        # Note: _retrieve_nodes handles retrieval + reranking + cutting to top_k
+        initial_nodes, used_query = _retrieve_nodes(
+            question, 
+            initial_top_k, 
+            search_mode, 
+            use_rerank, 
+            use_hyde
+        )
 
         if not initial_nodes:
             return {
@@ -694,14 +975,6 @@ def iterative_search(question: str, initial_top_k: int = 3, detailed_top_k: int 
                 "message": "No relevant documents found",
                 "suggestion": "Try rephrasing the question or using different keywords"
             }
-
-        # Rerank and get top initial results
-        if reranker:
-            initial_nodes = reranker.postprocess_nodes(initial_nodes, query_str=question)
-            # Manually slice to get desired top_k
-            initial_nodes = initial_nodes[:initial_top_k]
-        else:
-            initial_nodes = initial_nodes[:initial_top_k]
 
         # Format initial results
         initial_results = []
@@ -719,51 +992,39 @@ def iterative_search(question: str, initial_top_k: int = 3, detailed_top_k: int 
             }
             initial_results.append(result)
 
-            # Extract potential topics for refinement suggestions
             if node.node.metadata and 'file_name' in node.node.metadata:
                 topics_found.add(node.node.metadata['file_name'])
 
-        # Analyze score distribution to suggest if more results needed
-        if initial_results:
-            scores = [r['score'] for r in initial_results if r['score'] is not None]
-            avg_score = sum(scores) / len(scores) if scores else 0
+        # Analyze score distribution
+        scores = [r['score'] for r in initial_results if r['score'] is not None]
+        avg_score = sum(scores) / len(scores) if scores else 0
 
-            # Generate refinement suggestions
-            suggestions = []
+        # Generate suggestions
+        suggestions = []
+        
+        # Add mode-specific suggestions
+        if search_mode == "semantic" and avg_score < 0.7:
+            suggestions.append("Results have low relevance. Consider search_mode='hybrid' if searching for specific terms.")
+        
+        if avg_score < 0.7 and len(scores) > 0:
+            suggestions.append(f"Relevance is moderate (avg: {avg_score:.2f}). Consider refining the query.")
 
-            if avg_score < 0.7 and len(scores) > 0:
-                suggestions.append(
-                    f"Initial results have moderate relevance (avg score: {avg_score:.2f}). "
-                    "Consider refining the question or trying different keywords."
-                )
-
-            if len(initial_results) < initial_top_k:
-                suggestions.append(
-                    f"Only {len(initial_results)} documents found. The knowledge base may have limited information on this topic."
-                )
-            else:
-                suggestions.append(
-                    f"Found {len(initial_results)} initial results. "
-                    f"You can retrieve up to {detailed_top_k} more results using query_rag(similarity_top_k={detailed_top_k}) "
-                    "if you need broader context or want to explore related topics."
-                )
-
-            if topics_found:
-                suggestions.append(
-                    f"Documents found in: {', '.join(list(topics_found)[:3])}. "
-                    "You can search for specific aspects within these sources."
-                )
+        suggestions.append(
+            f"Found {len(initial_results)} initial results. "
+            f"You can retrieve more using query_rag(similarity_top_k={detailed_top_k}, search_mode='{search_mode}')"
+        )
 
         return {
             "initial_results": initial_results,
             "total_initial": len(initial_results),
-            "reranked": reranker is not None,
+            "search_mode": search_mode,
+            "reranked": use_rerank and get_reranker() is not None,
+            "used_hyde": use_hyde,
             "suggestions": suggestions,
             "next_steps": [
-                f"If satisfied: Use these {len(initial_results)} results to answer the question",
-                f"If need more context: Call query_rag(question='{question}', similarity_top_k={detailed_top_k})",
-                "If need clarification: Refine the question and search again",
-                "If found specific topics: Search for those specific aspects"
+                f"If satisfied: Answer the question",
+                f"If need more context: query_rag(question='{question}', similarity_top_k={detailed_top_k}, search_mode='{search_mode}')",
+                "If searching for exact term: Retry with search_mode='keyword'"
             ]
         }
 

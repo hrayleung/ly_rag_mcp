@@ -94,25 +94,29 @@ File size limit: 300MB per file
 ## MCP Tools
 
 ### Query
-- `query_rag(question, similarity_top_k=6, use_rerank=True)` - Retrieve documents
-  - **NEW**: `similarity_top_k` is now fully flexible (1-20) - let the LLM decide based on needs
-- `query_rag_with_sources(question, similarity_top_k=6, use_rerank=True)` - With metadata
-  - **NEW**: Same flexibility as query_rag
-- `iterative_search(question, initial_top_k=3, detailed_top_k=10)` - **NEW** two-phase search
-  - Start with focused results, get suggestions for follow-up searches
-  - Encourages multi-round refinement for better accuracy
+- `query_rag(question, similarity_top_k=6, search_mode='semantic', use_rerank=True, use_hyde=False)`
+  - **NEW**: `search_mode`: Choose 'semantic' (default), 'hybrid' (BM25+Vector), or 'keyword' (BM25)
+  - **NEW**: `use_hyde`: Enable Hypothetical Document Embeddings for better conceptual matching
+  - **NEW**: `similarity_top_k`: Fully flexible (1-50)
+- `query_rag_with_sources(...)` - Same options as above, returns metadata
+- `iterative_search(question, initial_top_k=3, detailed_top_k=10)` - Two-phase search
+
+### Ingestion
+- `crawl_website(url, max_depth=1, max_pages=10)` - **NEW** Crawl and index websites (requires `FIRECRAWL_API_KEY`)
+- `add_document_from_text(text, metadata)` - Add text dynamically
+- `add_documents_from_directory(path)` - Bulk import
+- `index_github_repository(...)` - Index GitHub repos
+- `index_local_codebase(...)` - Index local code
 
 ### Management
 - `get_index_stats()` - Index statistics
-- `get_cache_stats()` - **NEW** Cache performance metrics
+- `get_cache_stats()` - Cache performance metrics
 - `list_indexed_documents()` - List all documents
-- `add_document_from_text(text, metadata)` - Add text dynamically
-- `add_documents_from_directory(path)` - Bulk import
 - `clear_index()` - Clear index
 
 ### Debugging
-- `python debug_rag.py` - **NEW** Comprehensive diagnostics and profiling tool
-- Set `RAG_LOG_LEVEL=DEBUG` in MCP config for detailed logging
+- `python debug_rag.py` - Diagnostics tool
+- Set `RAG_LOG_LEVEL=DEBUG` for detailed logging
 
 ### Resources
 - `rag://documents` - Browse documents
@@ -121,18 +125,30 @@ File size limit: 300MB per file
 ## Architecture
 
 ```
-Documents → text-embedding-3-large → ChromaDB
+Query → HyDE (optional) → Hybrid Search (Vector + BM25)
                                          ↓
-Query → Embedding → Vector Search → Dynamic candidates (2x requested)
+Query → Embedding → Vector Search → Dynamic candidates
                                          ↓
                             Cohere Rerank v3.5 (optional)
                                          ↓
-                            Top N documents (LLM decides: 1-20) → MCP Client
-                                                                          ↓
-                                                                   Client's LLM
+                            Top N documents (LLM decides: 1-50) → MCP Client
 ```
 
 ## Search Strategies
+
+### Hybrid Search (Best for Technical Terms)
+Use `search_mode='hybrid'` when searching for specific acronyms, error codes, or exact phrases that semantic search might miss.
+
+### HyDE (Best for "How-To")
+Use `use_hyde=True` for conceptual questions where the answer might look very different from the question. The system will generate a hypothetical answer and search for that.
+
+### Web Crawling
+1. Get an API key from [Firecrawl](https://firecrawl.dev)
+2. Set `export FIRECRAWL_API_KEY='your-key'`
+3. Call `crawl_website("https://docs.example.com")`
+
+## Reranking
+
 
 ### Multi-Round Search (Recommended)
 
