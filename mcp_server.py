@@ -77,7 +77,7 @@ _cache_stats = {
 }
 
 # File upload constraints
-MAX_FILE_SIZE_MB = 300
+MAX_FILE_SIZE_MB = 100
 
 # Global Constants
 SUPPORTED_CODE_EXTS = {
@@ -94,6 +94,8 @@ SUPPORTED_DOC_EXTS = {
 }
 
 ALLOWED_EXTENSIONS = list(SUPPORTED_CODE_EXTS | SUPPORTED_DOC_EXTS | {'.jpg', '.jpeg', '.png'})
+ALLOWED_EXTENSIONS_SET = {ext.lower() for ext in ALLOWED_EXTENSIONS}
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 DEFAULT_EXCLUDES = [
     "node_modules", "__pycache__", ".git", ".svn", ".hg",
@@ -108,6 +110,22 @@ CODE_INDICATORS = {
     'files': {'package.json', 'requirements.txt', 'Cargo.toml', 'go.mod', 'pom.xml', 'build.gradle', 'Makefile', 'CMakeLists.txt'},
     'dirs': {'.git', '.vscode', '.idea', 'src', 'lib', 'include', 'node_modules', 'venv'}
 }
+
+# ---------------------------------------------------------------------------
+# File validation helpers
+# ---------------------------------------------------------------------------
+def _should_ingest_file(path: Path):
+    """Return (bool, reason) indicating whether the file is eligible for ingestion."""
+    ext = path.suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS_SET:
+        return False, "unsupported_extension"
+    try:
+        if path.stat().st_size > MAX_FILE_SIZE_BYTES:
+            return False, "file_too_large"
+    except OSError as exc:
+        logger.warning(f"Unable to stat {path}: {exc}. Skipping.")
+        return False, "stat_error"
+    return True, ""
 
 # ... (get_index and other helpers)
 
@@ -453,6 +471,11 @@ class RAGEventHandler(FileSystemEventHandler):
                 
                 # Create document
                 if not path.exists(): return
+
+                allowed, reason = _should_ingest_file(path)
+                if not allowed:
+                    logger.info(f"Skipping {path} (reason: {reason})")
+                    return
                 
                 documents = SimpleDirectoryReader(input_files=[str(path)]).load_data()
                 if not documents: return
@@ -907,14 +930,47 @@ def add_documents_from_directory(directory_path: str) -> dict:
         if not dir_path.is_dir():
             return {"error": f"Path is not a directory: {directory_path}"}
 
+        files_to_ingest = []
+        skipped_unsupported = []
+        skipped_oversize = []
+        skipped_other = []
+
+        for path in dir_path.rglob('*'):
+            if not path.is_file():
+                continue
+
+            allowed, reason = _should_ingest_file(path)
+            if not allowed:
+                target_list = {
+                    "unsupported_extension": skipped_unsupported,
+                    "file_too_large": skipped_oversize
+                }.get(reason, skipped_other)
+                target_list.append(str(path))
+                continue
+
+            files_to_ingest.append(path)
+
+        if not files_to_ingest:
+            message = "No documents found in directory"
+            if skipped_unsupported or skipped_oversize or skipped_other:
+                return {
+                    "error": message,
+                    "skipped_unsupported": len(skipped_unsupported),
+                    "skipped_oversize": len(skipped_oversize),
+                    "skipped_other": len(skipped_other),
+                    "max_file_size_mb": MAX_FILE_SIZE_MB,
+                    "allowed_extensions": sorted(ALLOWED_EXTENSIONS_SET),
+                }
+            return {"error": message}
+
         # Load documents
         documents = SimpleDirectoryReader(
-            input_dir=str(dir_path),
-            recursive=True
+            input_files=[str(p) for p in files_to_ingest],
+            errors='ignore'
         ).load_data()
 
         if not documents:
-            return {"error": "No documents found in directory"}
+            return {"error": "No documents could be loaded from directory"}
 
         # Add metadata
         for doc in documents:
@@ -948,7 +1004,11 @@ def add_documents_from_directory(directory_path: str) -> dict:
             "message": f"Successfully ingested {len(documents)} documents ({len(nodes)} chunks)",
             "document_count": len(documents),
             "chunks_created": len(nodes),
-            "directory": str(dir_path)
+            "directory": str(dir_path),
+            "skipped_unsupported": len(skipped_unsupported),
+            "skipped_oversize": len(skipped_oversize),
+            "skipped_other": len(skipped_other),
+            "max_file_size_mb": MAX_FILE_SIZE_MB,
         }
     except Exception as e:
         return {"error": f"Error ingesting documents: {str(e)}"}
@@ -1464,6 +1524,13 @@ def inspect_directory(path: str) -> dict:
     """
     Analyze folder to recommend 'index_local_codebase' or 'add_documents_from_directory'.
     
+    CRITICAL INSTRUCTION FOR LLM:
+    1.  Use this tool FIRST before indexing anything.
+    2.  Check the output for the suggested project name (derived from the folder).
+    3.  If the current project (from list_projects) is 'rag_collection' (default),
+        you MUST suggest creating/switching to the new project name BEFORE indexing.
+        Example: "I see this is the 'frontend' repo. Shall I create a 'frontend' project for it?"
+    
     Args:
         path: Absolute path.
     """
@@ -1536,9 +1603,12 @@ def inspect_directory(path: str) -> dict:
             reason = f"High document ratio ({doc_ratio:.1%}) found"
         else:
             reason = "Mixed content: contains both code and documents"
+            recommendation = "index_hybrid_folder"
 
         return {
             "path": str(dir_path),
+            "suggested_project_name": dir_path.name,
+            "current_active_project": _current_project,
             "stats": {
                 "total_files": stats['total_files'] if scanned < file_limit else f"{file_limit}+",
                 "code_files": stats['code_files'],
