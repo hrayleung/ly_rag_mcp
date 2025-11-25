@@ -498,17 +498,37 @@ def _save_project_manifest(project: str, manifest: dict) -> None:
 
 def _infer_candidate_roots(index) -> List[str]:
     """Gather possible source directories from indexed metadata."""
-    candidate_keys = ("sync_root", "source_directory", "codebase_root")
+    candidate_keys = ("sync_root", "source_directory", "codebase_root", "root_path")
     candidates: Set[str] = set()
+
+    # Try docstore metadata first
     try:
-        for node in index.docstore.docs.values():
+        docstore = getattr(index, "docstore", None)
+        docs = getattr(docstore, "docs", {}) or {}
+        for node in docs.values():
             metadata = getattr(node, "metadata", {}) or {}
             for key in candidate_keys:
                 value = metadata.get(key)
                 if isinstance(value, str) and value:
                     candidates.add(value)
     except Exception as exc:
-        logger.debug(f"Failed to scan metadata for candidate roots: {exc}")
+        logger.debug(f"Failed to scan docstore metadata for candidate roots: {exc}")
+
+    # Fallback to Chroma metadata if needed
+    if not candidates:
+        try:
+            _, collection = get_chroma_client()
+            result = collection.get(include=["metadatas"])
+            for meta in result.get("metadatas") or []:
+                if not isinstance(meta, dict):
+                    continue
+                for key in candidate_keys:
+                    value = meta.get(key)
+                    if isinstance(value, str) and value:
+                        candidates.add(value)
+        except Exception as exc:
+            logger.debug(f"Failed to scan Chroma metadata for candidate roots: {exc}")
+
     return sorted(candidates)
 
 
