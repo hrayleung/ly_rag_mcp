@@ -9,6 +9,7 @@ Enhanced with 2025 best practices:
 - Performance optimization with caching
 """
 import os
+import json
 import re
 import logging
 from pathlib import Path
@@ -387,6 +388,168 @@ def _infer_project_from_text(text: str) -> Optional[str]:
 
     return best_project
 
+
+def _require_project_selection(
+    action: str,
+    project: Optional[str],
+    suggested: Optional[str] = None
+) -> tuple:
+    """
+    Ensure an ingestion action has an explicit project target.
+
+    Returns (error_dict, resolved_project_name).
+    """
+    available_projects = _discover_projects_on_disk()
+
+    if not project:
+        message = (
+            f"{action} requires an explicit project. "
+            "Ask the user whether to create a new project or choose an existing one, "
+            "then call this tool again with the `project` parameter."
+        )
+        return (
+            {
+                "error": "project_confirmation_required",
+                "message": message,
+                "current_project": _current_project,
+                "available_projects": available_projects,
+                "suggested_project": suggested,
+                "next_steps": [
+                    "If new workspace: create_project('<name>')",
+                    "If existing workspace: switch_project('<name>')",
+                    f"Retry: {action}(..., project='<name>')"
+                ]
+            },
+            None
+        )
+
+    project_name = project.strip()
+    if not project_name:
+        return (
+            {
+                "error": "invalid_project_name",
+                "message": "Project name cannot be empty. Use alphanumeric characters, '-' or '_'."
+            },
+            None
+        )
+
+    if any(not (c.isalnum() or c in ('_', '-')) for c in project_name):
+        return (
+            {
+                "error": "invalid_project_name",
+                "message": "Project names may only contain letters, numbers, '-' and '_'.",
+                "received": project_name
+            },
+            None
+        )
+
+    if project_name not in available_projects:
+        return (
+            {
+                "error": "project_not_found",
+                "message": (
+                    f"Project '{project_name}' not found. "
+                    "Create it first with create_project(...) before indexing."
+                ),
+                "available_projects": available_projects
+            },
+            None
+        )
+
+    if project_name != _current_project:
+        get_index(project_name)
+
+    return None, project_name
+
+
+def _load_project_manifest(project: str) -> dict:
+    """Load or initialize the change-tracking manifest for a project."""
+    manifest_path = STORAGE_PATH / project / "ingest_manifest.json"
+    if manifest_path.exists():
+        try:
+            with manifest_path.open("r", encoding="utf-8") as manifest_file:
+                data = json.load(manifest_file)
+                if isinstance(data, dict):
+                    data.setdefault("roots", {})
+                    return data
+        except Exception as exc:
+            logger.warning(f"Failed to load manifest for {project}: {exc}. Reinitializing.")
+
+    return {"roots": {}, "updated_at": datetime.now().isoformat()}
+
+
+def _save_project_manifest(project: str, manifest: dict) -> None:
+    """Persist the project manifest to disk."""
+    manifest_path = STORAGE_PATH / project / "ingest_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest["updated_at"] = datetime.now().isoformat()
+    with manifest_path.open("w", encoding="utf-8") as manifest_file:
+        json.dump(manifest, manifest_file, indent=2, sort_keys=True)
+
+
+def _retrieve_nodes_for_index(
+    index,
+    question: str,
+    search_query: str,
+    similarity_top_k: int,
+    search_mode: str,
+    use_rerank: bool,
+) -> List:
+    """Run retrieval against a specific index."""
+    # Determine candidate count (fetch more if reranking)
+    initial_top_k = similarity_top_k
+    if use_rerank:
+        initial_top_k = max(
+            similarity_top_k * RERANK_CANDIDATE_MULTIPLIER,
+            MIN_RERANK_CANDIDATES
+        )
+
+    # Select Retriever
+    if search_mode == "hybrid":
+        vector_retriever = index.as_retriever(similarity_top_k=initial_top_k)
+        bm25_retriever = get_bm25_retriever(index)
+
+        if bm25_retriever:
+            bm25_retriever.similarity_top_k = initial_top_k
+            retriever = QueryFusionRetriever(
+                [vector_retriever, bm25_retriever],
+                similarity_top_k=initial_top_k,
+                num_queries=1,  # Simple RRF
+                mode="reciprocal_rerank",
+                use_async=False,
+                verbose=True
+            )
+        else:
+            logger.warning("BM25 retriever creation failed, falling back to semantic")
+            retriever = vector_retriever
+
+    elif search_mode == "keyword":
+        bm25_retriever = get_bm25_retriever(index)
+        if bm25_retriever:
+            bm25_retriever.similarity_top_k = initial_top_k
+            retriever = bm25_retriever
+        else:
+            logger.warning("BM25 retriever creation failed, falling back to semantic")
+            retriever = index.as_retriever(similarity_top_k=initial_top_k)
+
+    else:  # semantic (default)
+        retriever = index.as_retriever(similarity_top_k=initial_top_k)
+
+    # Retrieve
+    nodes = retriever.retrieve(search_query)
+
+    # Rerank
+    reranker = get_reranker()
+    if use_rerank and reranker and nodes:
+        # Rerank against ORIGINAL question for relevance
+        nodes = reranker.postprocess_nodes(nodes, query_str=question)
+        nodes = nodes[:similarity_top_k]
+    elif not use_rerank:
+        # Just slice if no reranker
+        nodes = nodes[:similarity_top_k]
+
+    return nodes
+
 @mcp.tool()
 def create_project(name: str) -> dict:
     """Create a new isolated project (workspace)."""
@@ -598,61 +761,66 @@ def _retrieve_nodes(
         search_query = _generate_hyde_query(question)
 
     inferred_project = _infer_project_from_text(question)
-    if inferred_project and inferred_project != _current_project:
-        logger.info(f"Auto-selecting project '{inferred_project}' for query: {question[:80]}")
 
-    index = get_index(inferred_project)
+    candidate_projects: List[str] = []
+    if inferred_project:
+        candidate_projects.append(inferred_project)
+    if _current_project not in candidate_projects:
+        candidate_projects.append(_current_project)
 
-    # Determine candidate count (fetch more if reranking)
-    initial_top_k = similarity_top_k
-    if use_rerank:
-        initial_top_k = max(similarity_top_k * RERANK_CANDIDATE_MULTIPLIER, MIN_RERANK_CANDIDATES)
+    for project in _discover_projects_on_disk():
+        if project not in candidate_projects:
+            candidate_projects.append(project)
 
-    # Select Retriever
-    if search_mode == "hybrid":
-        vector_retriever = index.as_retriever(similarity_top_k=initial_top_k)
-        bm25_retriever = get_bm25_retriever(index)
-        
-        if bm25_retriever:
-            bm25_retriever.similarity_top_k = initial_top_k
-            retriever = QueryFusionRetriever(
-                [vector_retriever, bm25_retriever],
-                similarity_top_k=initial_top_k,
-                num_queries=1,  # Simple RRF
-                mode="reciprocal_rerank",
-                use_async=False,
-                verbose=True
-            )
+    original_project = _current_project
+    best_project = None
+    best_nodes = []
+    best_score = float("-inf")
+    fallback_nodes = []
+    fallback_project = None
+
+    for project in candidate_projects:
+        index = get_index(project)
+        nodes = _retrieve_nodes_for_index(
+            index=index,
+            question=question,
+            search_query=search_query,
+            similarity_top_k=similarity_top_k,
+            search_mode=search_mode,
+            use_rerank=use_rerank,
+        )
+
+        fallback_nodes = nodes
+        fallback_project = project
+
+        if nodes:
+            top_score = nodes[0].score if nodes[0].score is not None else 0.0
         else:
-            logger.warning("BM25 retriever creation failed, falling back to semantic")
-            retriever = vector_retriever
+            top_score = float("-inf")
 
-    elif search_mode == "keyword":
-        bm25_retriever = get_bm25_retriever(index)
-        if bm25_retriever:
-            bm25_retriever.similarity_top_k = initial_top_k
-            retriever = bm25_retriever
-        else:
-            logger.warning("BM25 retriever creation failed, falling back to semantic")
-            retriever = index.as_retriever(similarity_top_k=initial_top_k)
+        if inferred_project and project == inferred_project and nodes:
+            best_project = project
+            best_nodes = nodes
+            best_score = top_score
+            break
 
-    else:  # semantic (default)
-        retriever = index.as_retriever(similarity_top_k=initial_top_k)
+        if nodes and top_score > best_score:
+            best_project = project
+            best_nodes = nodes
+            best_score = top_score
 
-    # Retrieve
-    nodes = retriever.retrieve(search_query)
-    
-    # Rerank
-    reranker = get_reranker()
-    if use_rerank and reranker and nodes:
-        # Rerank against ORIGINAL question for relevance
-        nodes = reranker.postprocess_nodes(nodes, query_str=question)
-        nodes = nodes[:similarity_top_k]
-    elif not use_rerank:
-        # Just slice if no reranker
-        nodes = nodes[:similarity_top_k]
+    if best_project:
+        if best_project != _current_project:
+            get_index(best_project)
+        if best_project != original_project:
+            logger.info(f"Auto-selected project '{best_project}' for query: {question[:80]}")
+        return best_nodes, search_query
 
-    return nodes, search_query
+    # No strong project match found; revert to original project context.
+    if original_project != _current_project:
+        get_index(original_project)
+
+    return fallback_nodes, search_query
 
 
 @mcp.tool()
@@ -865,14 +1033,23 @@ def add_document_from_text(text: str, metadata: dict = None) -> dict:
 
 
 @mcp.tool()
-def add_documents_from_directory(directory_path: str) -> dict:
+def add_documents_from_directory(directory_path: str, project: Optional[str] = None) -> dict:
     """
     Index all docs in directory (recursive).
     
     Args:
         directory_path: Absolute path.
+        project: Target project/workspace to store ingested data.
     """
     try:
+        project_error, resolved_project = _require_project_selection(
+            "add_documents_from_directory",
+            project,
+            suggested=Path(directory_path).name if directory_path else None
+        )
+        if project_error:
+            return project_error
+
         dir_path = Path(directory_path)
 
         # Validate directory
@@ -931,7 +1108,7 @@ def add_documents_from_directory(directory_path: str) -> dict:
             doc.metadata['source_directory'] = str(dir_path)
 
         # Add to index with SMART chunking
-        index = get_index()
+        index = get_index(resolved_project)
         nodes = []
         
         for doc in documents:
@@ -1360,7 +1537,8 @@ def index_github_repository(
 @mcp.tool()
 def index_hybrid_folder(
     path: str,
-    exclude_patterns: Optional[List[str]] = None
+    exclude_patterns: Optional[List[str]] = None,
+    project: Optional[str] = None
 ) -> dict:
     """
     Index a folder containing mixed content (Code + Documents).
@@ -1370,6 +1548,7 @@ def index_hybrid_folder(
     Args:
         path: Directory path.
         exclude_patterns: Additional glob patterns to ignore.
+        project: Target project/workspace to store ingested data.
     """
     try:
         dir_path = Path(path).resolve()
@@ -1379,7 +1558,15 @@ def index_hybrid_folder(
         if not dir_path.is_dir():
             return {"error": f"Path is not a directory: {path}"}
 
-        logger.info(f"Hybrid indexing: {dir_path}")
+        project_error, resolved_project = _require_project_selection(
+            "index_hybrid_folder",
+            project,
+            suggested=dir_path.name
+        )
+        if project_error:
+            return project_error
+
+        logger.info(f"Hybrid indexing: {dir_path} -> project {resolved_project}")
 
         # Prepare Excludes
         user_excludes = exclude_patterns or []
@@ -1445,7 +1632,7 @@ def index_hybrid_folder(
                 doc.metadata['content_type'] = 'document'
 
         # SMART Chunking
-        index = get_index()
+        index = get_index(resolved_project)
         nodes = []
         for doc in documents:
             file_path = doc.metadata.get('file_path', '')
@@ -1469,6 +1656,229 @@ def index_hybrid_folder(
     except Exception as e:
         logger.error(f"Error in hybrid indexing: {e}", exc_info=True)
         return {"error": f"Hybrid indexing failed: {str(e)}"}
+
+
+@mcp.tool()
+def index_modified_files(
+    path: str,
+    project: Optional[str] = None
+) -> dict:
+    """
+    Index only new or modified files under a directory for a given project.
+    Tracks file mtimes in a per-project manifest to avoid reprocessing unchanged files.
+    
+    Args:
+        path: Directory path to monitor.
+        project: Target project/workspace to store ingested data.
+    """
+    try:
+        dir_path = Path(path).resolve()
+
+        if not dir_path.exists():
+            return {"error": f"Path not found: {path}"}
+        if not dir_path.is_dir():
+            return {"error": f"Path is not a directory: {path}"}
+
+        project_error, resolved_project = _require_project_selection(
+            "index_modified_files",
+            project,
+            suggested=dir_path.name
+        )
+        if project_error:
+            return project_error
+
+        index = get_index(resolved_project)
+        existing_doc_count = len(index.docstore.docs)
+
+        manifest = _load_project_manifest(resolved_project)
+        roots = manifest.setdefault("roots", {})
+        root_key = str(dir_path)
+        root_entry = roots.get(root_key, {})
+
+        previous_files_raw = root_entry.get("files", {})
+        previous_files: dict[str, int] = {}
+        for rel_path, info in previous_files_raw.items():
+            if isinstance(info, dict):
+                prev_mtime = info.get("mtime_ns")
+            else:
+                prev_mtime = info
+            try:
+                previous_files[rel_path] = int(prev_mtime)
+            except (TypeError, ValueError):
+                previous_files[rel_path] = 0
+
+        changed_paths: List[Path] = []
+        change_map: dict[str, dict[str, str]] = {}
+        current_files: dict[str, int] = {}
+        new_files: List[str] = []
+        modified_files: List[str] = []
+        skipped_unsupported: List[str] = []
+        skipped_oversize: List[str] = []
+        skipped_other: List[str] = []
+
+        for item in dir_path.rglob('*'):
+            if not item.is_file():
+                continue
+
+            allowed, reason = _should_ingest_file(item)
+            if not allowed:
+                target_list = {
+                    "unsupported_extension": skipped_unsupported,
+                    "file_too_large": skipped_oversize
+                }.get(reason, skipped_other)
+                target_list.append(str(item))
+                continue
+
+            rel_path = str(item.relative_to(dir_path))
+            try:
+                mtime_ns = item.stat().st_mtime_ns
+            except OSError as exc:
+                logger.warning(f"Failed to stat {item}: {exc}. Skipping.")
+                skipped_other.append(str(item))
+                continue
+
+            current_files[rel_path] = mtime_ns
+            prev_mtime = previous_files.get(rel_path)
+
+            if prev_mtime is None:
+                changed_paths.append(item)
+                new_files.append(rel_path)
+                change_map[str(item.resolve())] = {
+                    "change": "new",
+                    "relative_path": rel_path
+                }
+            elif mtime_ns > prev_mtime:
+                changed_paths.append(item)
+                modified_files.append(rel_path)
+                change_map[str(item.resolve())] = {
+                    "change": "modified",
+                    "relative_path": rel_path
+                }
+
+        removed_files = sorted(set(previous_files.keys()) - set(current_files.keys()))
+
+        baseline_run = len(previous_files) == 0
+
+        if not changed_paths:
+            # Persist manifest updates (removals) even if nothing was indexed
+            roots[root_key] = {
+                "files": {
+                    rel: {"mtime_ns": current_files[rel]}
+                    for rel in sorted(current_files.keys())
+                },
+                "last_scan": datetime.now().isoformat()
+            }
+            _save_project_manifest(resolved_project, manifest)
+
+            message = "No new or modified files detected."
+            if removed_files:
+                message += f" {len(removed_files)} previously indexed file(s) were removed."
+            elif baseline_run and existing_doc_count > 0:
+                message = (
+                    "Baseline recorded for incremental indexing. "
+                    "No files were re-indexed because the project already contained data."
+                )
+            return {
+                "success": True,
+                "message": message,
+                "project": resolved_project,
+                "directory": str(dir_path),
+                "removed_files": removed_files,
+                "skipped_unsupported": len(skipped_unsupported),
+                "skipped_oversize": len(skipped_oversize),
+                "skipped_other": len(skipped_other),
+            }
+
+        if baseline_run and existing_doc_count > 0:
+            roots[root_key] = {
+                "files": {
+                    rel: {"mtime_ns": current_files[rel]}
+                    for rel in sorted(current_files.keys())
+                },
+                "last_scan": datetime.now().isoformat()
+            }
+            _save_project_manifest(resolved_project, manifest)
+            return {
+                "success": True,
+                "message": (
+                    "Baseline recorded for incremental indexing. "
+                    "No files were re-indexed because the project already contained data."
+                ),
+                "project": resolved_project,
+                "directory": str(dir_path),
+                "tracked_files": sorted(current_files.keys()),
+                "removed_files": removed_files,
+                "skipped_unsupported": len(skipped_unsupported),
+                "skipped_oversize": len(skipped_oversize),
+                "skipped_other": len(skipped_other),
+            }
+
+        # Load documents only for changed files
+        documents = SimpleDirectoryReader(
+            input_files=[str(p) for p in changed_paths],
+            errors='ignore'
+        ).load_data()
+
+        if not documents:
+            return {"error": "Failed to load changed files for indexing"}
+
+        nodes = []
+        chunk_count = 0
+
+        for doc in documents:
+            file_path_str = doc.metadata.get('file_path')
+            change_meta = None
+            if file_path_str:
+                change_meta = change_map.get(str(Path(file_path_str).resolve()))
+
+            rel_path = change_meta['relative_path'] if change_meta else None
+            change_label = change_meta['change'] if change_meta else "modified"
+
+            doc.metadata['sync_root'] = str(dir_path)
+            doc.metadata['project'] = resolved_project
+            if rel_path:
+                doc.metadata['relative_path'] = rel_path
+            doc.metadata['change_type'] = change_label
+            doc.metadata['ingested_via'] = 'index_modified_files'
+            doc.metadata['ingested_at'] = datetime.now().isoformat()
+
+            splitter = get_splitter_for_file(file_path_str or "")
+            doc_nodes = splitter.get_nodes_from_documents([doc])
+            nodes.extend(doc_nodes)
+            chunk_count += len(doc_nodes)
+
+        index.insert_nodes(nodes)
+        project_storage_path = STORAGE_PATH / _current_project
+        index.storage_context.persist(persist_dir=str(project_storage_path))
+
+        # Update manifest with latest mtimes (and drop removed files)
+        roots[root_key] = {
+            "files": {
+                rel: {"mtime_ns": current_files[rel]}
+                for rel in sorted(current_files.keys())
+            },
+            "last_scan": datetime.now().isoformat()
+        }
+        _save_project_manifest(resolved_project, manifest)
+
+        return {
+            "success": True,
+            "message": f"Indexed {len(changed_paths)} changed file(s) ({chunk_count} chunks)",
+            "project": resolved_project,
+            "directory": str(dir_path),
+            "files_indexed": len(changed_paths),
+            "new_files": new_files,
+            "modified_files": modified_files,
+            "removed_files": removed_files,
+            "chunks_created": chunk_count,
+            "skipped_unsupported": len(skipped_unsupported),
+            "skipped_oversize": len(skipped_oversize),
+            "skipped_other": len(skipped_other),
+        }
+
+    except Exception as e:
+        logger.error(f"Error indexing modified files: {e}", exc_info=True)
+        return {"error": f"Error indexing modified files: {str(e)}"}
 
 
 @mcp.tool()
@@ -1581,7 +1991,8 @@ def index_local_codebase(
     directory_path: str,
     language_filter: Optional[List[str]] = None,
     exclude_patterns: Optional[List[str]] = None,
-    include_hidden: bool = False
+    include_hidden: bool = False,
+    project: Optional[str] = None
 ) -> dict:
     """
     Index local code with smart filtering.
@@ -1591,6 +2002,7 @@ def index_local_codebase(
         language_filter: Languages (e.g., ['python', '.ts']).
         exclude_patterns: Glob patterns to ignore.
         include_hidden: Include dotfiles (default: False).
+        project: Target project/workspace to store ingested data.
     """
     try:
         dir_path = Path(directory_path).resolve()
@@ -1602,7 +2014,15 @@ def index_local_codebase(
         if not dir_path.is_dir():
             return {"error": f"Path is not a directory: {directory_path}"}
 
-        logger.info(f"Indexing local codebase: {dir_path}")
+        project_error, resolved_project = _require_project_selection(
+            "index_local_codebase",
+            project,
+            suggested=dir_path.name
+        )
+        if project_error:
+            return project_error
+
+        logger.info(f"Indexing local codebase: {dir_path} -> project {resolved_project}")
 
         # Language to extension mapping
         LANGUAGE_EXTENSIONS = {
@@ -1740,7 +2160,7 @@ def index_local_codebase(
                         break
 
         # SMART Chunking
-        index = get_index()
+        index = get_index(resolved_project)
         nodes = []
         for doc in documents:
             file_path = doc.metadata.get('file_path', '')

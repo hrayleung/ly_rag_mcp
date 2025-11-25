@@ -109,17 +109,19 @@ File size limit: 300MB per file
 
 ### Ingestion
 - `inspect_directory(path)` - Analyze folder content
-- `index_hybrid_folder(path)` - **NEW** Index mixed content (Code + Docs)
+- `index_hybrid_folder(path, project)` - **NEW** Index mixed content (Code + Docs)
+- `index_modified_files(path, project)` - Sync only new/changed files since last scan
 - `crawl_website(url, max_depth=1, max_pages=10)` - Crawl websites
 - `add_document_from_text(text, metadata)` - Add text dynamically
-- `add_documents_from_directory(path)` - Bulk import
+- `add_documents_from_directory(path, project)` - Bulk import
 - `index_github_repository(...)` - Index GitHub repos
-- `index_local_codebase(...)` - Index local code
+- `index_local_codebase(..., project)` - Index local code
+- Reminder: Folder ingestion tools (including `index_modified_files`) require a `project` argument. If omitted, the server returns `project_confirmation_required` so you can confirm whether to create or reuse a workspace before indexing. The first run of `index_modified_files` seeds a baseline when the project already has data, so subsequent runs only add new or changed files.
 
 ### Advanced Features
 - **Multi-Project**: Isolate indexes.
   - `create_project(name)`, `switch_project(name)`, `list_projects()`
-- **Smart Project Routing**: Queries auto-select a project when its name appears in the prompt.
+- **Smart Project Routing**: Queries scan project workspaces and pick the best match (explicit mentions win).
 - **Smart Splitting**: Automatically uses AST (tree-sitter) for code and sentence splitting for docs.
 
 ### Management
@@ -157,7 +159,7 @@ Docs → Text Splitter ┴→ Vector       ↓
 2. `switch_project("backend")`
 3. Index backend files.
 4. Switch to "frontend" to keep contexts clean.
-5. Or just ask about "frontend" directly—queries mentioning a project name auto-route.
+5. Or just ask about "frontend" directly—queries mentioning a project name auto-route, and the server falls back to the most relevant project when nothing is explicit.
 
 ## Reranking
 
