@@ -151,6 +151,8 @@ Docs → Text Splitter ┴→ Vector       ↓
 
 ## Search Strategies
 
+- Adaptive routing automatically switches between semantic and hybrid search when the query looks like code or an exact identifier.
+- HyDE only kicks in when initial results are weak, and reranking is skipped when there's a clear top match to save latency/tokens.
 ### Hybrid Search (Technical Terms)
 `search_mode='hybrid'` combines vector + keyword search. Best for error codes and acronyms.
 

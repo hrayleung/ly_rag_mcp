@@ -138,6 +138,15 @@ DEFAULT_TOP_K = 6
 RERANK_CANDIDATE_MULTIPLIER = 2
 MIN_RERANK_CANDIDATES = 10
 
+# Search strategy heuristics
+HYBRID_QUERY_TOKENS = re.compile(r"[A-Z_]{2,}|::|->|\.|\d{3,}")
+CODE_SNIPPET_RE = re.compile(r"[{}();=<>*/+-]")
+LOW_SCORE_THRESHOLD = 0.2
+RERANK_DELTA_THRESHOLD = 0.05
+RERANK_MIN_RESULTS = 3
+HYDE_TRIGGER_MIN_RESULTS = 1
+HYDE_TRIGGER_SCORE = 0.1
+
 
 def validate_top_k(top_k: int) -> int:
     """Validate and clamp top_k parameter."""
@@ -487,6 +496,90 @@ def _save_project_manifest(project: str, manifest: dict) -> None:
         json.dump(manifest, manifest_file, indent=2, sort_keys=True)
 
 
+def _analyze_query_signals(question: str) -> dict:
+    """Extract lightweight heuristics from the query text."""
+    tokens = question.strip().split()
+    has_hybrid_tokens = bool(HYBRID_QUERY_TOKENS.search(question))
+    has_code_chars = bool(CODE_SNIPPET_RE.search(question))
+    avg_token_len = sum(len(t) for t in tokens) / len(tokens) if tokens else 0
+    uppercase_ratio = sum(1 for t in tokens if t.isupper() and len(t) > 1) / len(tokens) if tokens else 0
+    digit_ratio = sum(1 for t in tokens if any(ch.isdigit() for ch in t)) / len(tokens) if tokens else 0
+    return {
+        "tokens": tokens,
+        "has_hybrid_tokens": has_hybrid_tokens,
+        "has_code_chars": has_code_chars,
+        "avg_token_len": avg_token_len,
+        "uppercase_ratio": uppercase_ratio,
+        "digit_ratio": digit_ratio,
+    }
+
+
+def _select_search_mode(question: str, requested_mode: str) -> str:
+    """
+    Choose an appropriate search mode.
+
+    If the caller explicitly requests keyword/hybrid we respect that.
+    Otherwise we use heuristics to flip between semantic and hybrid.
+    """
+    requested_mode = (requested_mode or "semantic").lower()
+    if requested_mode in ("keyword", "hybrid"):
+        return requested_mode
+
+    signals = _analyze_query_signals(question)
+
+    if signals["has_hybrid_tokens"] or signals["has_code_chars"]:
+        logger.debug("Query signals indicate technical content; using hybrid search.")
+        return "hybrid"
+
+    if signals["uppercase_ratio"] > 0.3 or signals["digit_ratio"] > 0.4:
+        logger.debug("Query heavy in uppercase/digits; switching to hybrid search.")
+        return "hybrid"
+
+    return "semantic"
+
+
+def _should_apply_reranker(nodes, requested: bool) -> bool:
+    """Decide whether running the reranker is worth it."""
+    if not requested or not nodes:
+        return False
+
+    if len(nodes) < RERANK_MIN_RESULTS:
+        return False
+
+    scores = [node.score for node in nodes if node.score is not None]
+    if len(scores) < 2:
+        return True
+
+    top_score = scores[0]
+    second_score = scores[1]
+    if top_score is None or second_score is None:
+        return True
+
+    if abs(top_score - second_score) < RERANK_DELTA_THRESHOLD:
+        return True
+
+    logger.debug("Skipping reranker (clear winner among candidates).")
+    return False
+
+
+def _should_trigger_hyde(nodes) -> bool:
+    """Determine whether to fall back to HyDE augmentation."""
+    if not nodes:
+        return True
+
+    scores = [node.score for node in nodes if node.score is not None]
+    if not scores:
+        return True
+
+    if len(scores) <= HYDE_TRIGGER_MIN_RESULTS and scores[0] < HYDE_TRIGGER_SCORE:
+        return True
+
+    if max(scores) < LOW_SCORE_THRESHOLD:
+        return True
+
+    return False
+
+
 def _retrieve_nodes_for_index(
     index,
     question: str,
@@ -494,7 +587,7 @@ def _retrieve_nodes_for_index(
     similarity_top_k: int,
     search_mode: str,
     use_rerank: bool,
-) -> List:
+) -> tuple[List, bool]:
     """Run retrieval against a specific index."""
     # Determine candidate count (fetch more if reranking)
     initial_top_k = similarity_top_k
@@ -538,17 +631,18 @@ def _retrieve_nodes_for_index(
     # Retrieve
     nodes = retriever.retrieve(search_query)
 
-    # Rerank
     reranker = get_reranker()
-    if use_rerank and reranker and nodes:
-        # Rerank against ORIGINAL question for relevance
+    apply_rerank = _should_apply_reranker(nodes, use_rerank) and reranker is not None
+    rerank_used = False
+
+    if apply_rerank:
         nodes = reranker.postprocess_nodes(nodes, query_str=question)
         nodes = nodes[:similarity_top_k]
-    elif not use_rerank:
-        # Just slice if no reranker
+        rerank_used = True
+    else:
         nodes = nodes[:similarity_top_k]
 
-    return nodes
+    return nodes, rerank_used
 
 @mcp.tool()
 def create_project(name: str) -> dict:
@@ -755,10 +849,10 @@ def _retrieve_nodes(
     question = validate_query(question)
     similarity_top_k = validate_top_k(similarity_top_k)
 
-    # HyDE transformation
-    search_query = question
-    if use_hyde:
-        search_query = _generate_hyde_query(question)
+    requested_mode = (search_mode or "semantic").lower()
+    effective_mode = _select_search_mode(question, requested_mode)
+    if effective_mode != requested_mode:
+        logger.info(f"Adjusted search mode from '{requested_mode}' to '{effective_mode}' for query: {question[:80]}")
 
     inferred_project = _infer_project_from_text(question)
 
@@ -778,49 +872,83 @@ def _retrieve_nodes(
     best_score = float("-inf")
     fallback_nodes = []
     fallback_project = None
+    fallback_query = question
+    fallback_rerank_used = False
+    best_query = question
+    best_rerank_used = False
 
     for project in candidate_projects:
         index = get_index(project)
-        nodes = _retrieve_nodes_for_index(
-            index=index,
-            question=question,
-            search_query=search_query,
-            similarity_top_k=similarity_top_k,
-            search_mode=search_mode,
-            use_rerank=use_rerank,
-        )
+        hyde_attempted = bool(use_hyde)
+        search_query = _generate_hyde_query(question) if hyde_attempted else question
+        project_nodes = []
+        project_query_used = search_query
+        project_rerank_used = False
 
-        fallback_nodes = nodes
+        for attempt in range(2):
+            nodes, rerank_used = _retrieve_nodes_for_index(
+                index=index,
+                question=question,
+                search_query=search_query,
+                similarity_top_k=similarity_top_k,
+                search_mode=effective_mode,
+                use_rerank=use_rerank,
+            )
+
+            if nodes:
+                project_nodes = nodes
+                project_rerank_used = rerank_used
+                if hyde_attempted or not _should_trigger_hyde(nodes):
+                    break
+
+            if hyde_attempted:
+                break
+
+            logger.info(f"HyDE fallback triggered for project '{project}' on query: {question[:80]}")
+            hyde_attempted = True
+            search_query = _generate_hyde_query(question)
+            project_query_used = search_query
+        else:
+            project_nodes = nodes
+            project_rerank_used = rerank_used
+
+        fallback_nodes = project_nodes
         fallback_project = project
+        fallback_query = project_query_used
+        fallback_rerank_used = project_rerank_used
 
-        if nodes:
-            top_score = nodes[0].score if nodes[0].score is not None else 0.0
+        if project_nodes:
+            top_score = project_nodes[0].score if project_nodes[0].score is not None else 0.0
         else:
             top_score = float("-inf")
 
-        if inferred_project and project == inferred_project and nodes:
+        if inferred_project and project == inferred_project and project_nodes:
             best_project = project
-            best_nodes = nodes
+            best_nodes = project_nodes
             best_score = top_score
+            best_query = project_query_used
+            best_rerank_used = project_rerank_used
             break
 
-        if nodes and top_score > best_score:
+        if project_nodes and top_score > best_score:
             best_project = project
-            best_nodes = nodes
+            best_nodes = project_nodes
             best_score = top_score
+            best_query = project_query_used
+            best_rerank_used = project_rerank_used
 
     if best_project:
         if best_project != _current_project:
             get_index(best_project)
         if best_project != original_project:
             logger.info(f"Auto-selected project '{best_project}' for query: {question[:80]}")
-        return best_nodes, search_query
+        return best_nodes, best_query, effective_mode, best_rerank_used
 
     # No strong project match found; revert to original project context.
     if original_project != _current_project:
         get_index(original_project)
 
-    return fallback_nodes, search_query
+    return fallback_nodes, fallback_query, effective_mode, fallback_rerank_used
 
 
 @mcp.tool()
@@ -843,7 +971,13 @@ def query_rag(
         use_hyde: Enable HyDE for ambiguous queries (default: False).
     """
     try:
-        nodes, used_query = _retrieve_nodes(question, similarity_top_k, search_mode, use_rerank, use_hyde)
+        nodes, used_query, used_mode, rerank_used = _retrieve_nodes(
+            question,
+            similarity_top_k,
+            search_mode,
+            use_rerank,
+            use_hyde
+        )
 
         logger.debug(f"Retrieved {len(nodes)} nodes")
 
@@ -852,9 +986,9 @@ def query_rag(
             return "No relevant documents found in the knowledge base."
 
         # Format the retrieved chunks
-        rerank_label = " + Cohere Rerank" if use_rerank and get_reranker() else ""
-        hyde_label = " + HyDE" if use_hyde else ""
-        mode_label = f" ({search_mode}{hyde_label}{rerank_label})"
+        rerank_label = " + Cohere Rerank" if rerank_used else ""
+        hyde_label = " + HyDE" if used_query != question else ""
+        mode_label = f" ({used_mode}{hyde_label}{rerank_label})"
         
         result = f"Found {len(nodes)} relevant document(s){mode_label}:\n\n"
 
@@ -902,7 +1036,13 @@ def query_rag_with_sources(
         use_hyde: Enable HyDE (default: False).
     """
     try:
-        nodes, used_query = _retrieve_nodes(question, similarity_top_k, search_mode, use_rerank, use_hyde)
+        nodes, used_query, used_mode, rerank_used = _retrieve_nodes(
+            question,
+            similarity_top_k,
+            search_mode,
+            use_rerank,
+            use_hyde
+        )
 
         if not nodes:
             logger.info("No relevant documents found")
@@ -925,9 +1065,9 @@ def query_rag_with_sources(
         return {
             "sources": sources,
             "total_found": len(sources),
-            "search_mode": search_mode,
-            "reranked": use_rerank and get_reranker() is not None,
-            "used_hyde": use_hyde,
+            "search_mode": used_mode,
+            "reranked": rerank_used,
+            "used_hyde": used_query != question,
             "generated_query": used_query if use_hyde else None
         }
     except ValueError as e:
@@ -1358,11 +1498,11 @@ def iterative_search(
 
         # Use shared retrieval logic
         # Note: _retrieve_nodes handles retrieval + reranking + cutting to top_k
-        initial_nodes, used_query = _retrieve_nodes(
-            question, 
-            initial_top_k, 
-            search_mode, 
-            use_rerank, 
+        initial_nodes, used_query, initial_mode, initial_rerank = _retrieve_nodes(
+            question,
+            initial_top_k,
+            search_mode,
+            use_rerank,
             use_hyde
         )
 
@@ -1400,7 +1540,7 @@ def iterative_search(
         suggestions = []
         
         # Add mode-specific suggestions
-        if search_mode == "semantic" and avg_score < 0.7:
+        if initial_mode == "semantic" and avg_score < 0.7:
             suggestions.append("Results have low relevance. Consider search_mode='hybrid' if searching for specific terms.")
         
         if avg_score < 0.7 and len(scores) > 0:
@@ -1408,19 +1548,19 @@ def iterative_search(
 
         suggestions.append(
             f"Found {len(initial_results)} initial results. "
-            f"You can retrieve more using query_rag(similarity_top_k={detailed_top_k}, search_mode='{search_mode}')"
+            f"You can retrieve more using query_rag(similarity_top_k={detailed_top_k}, search_mode='{initial_mode}')"
         )
 
         return {
             "initial_results": initial_results,
             "total_initial": len(initial_results),
-            "search_mode": search_mode,
-            "reranked": use_rerank and get_reranker() is not None,
-            "used_hyde": use_hyde,
+            "search_mode": initial_mode,
+            "reranked": initial_rerank,
+            "used_hyde": used_query != question,
             "suggestions": suggestions,
             "next_steps": [
                 f"If satisfied: Answer the question",
-                f"If need more context: query_rag(question='{question}', similarity_top_k={detailed_top_k}, search_mode='{search_mode}')",
+                f"If need more context: query_rag(question='{question}', similarity_top_k={detailed_top_k}, search_mode='{initial_mode}')",
                 "If searching for exact term: Retry with search_mode='keyword'"
             ]
         }
