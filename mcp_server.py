@@ -9,6 +9,7 @@ Enhanced with 2025 best practices:
 - Performance optimization with caching
 """
 import os
+import re
 import logging
 from pathlib import Path
 from datetime import datetime
@@ -330,6 +331,62 @@ def get_index(collection_name: str = None):
 
 # --- Project Management Tools ---
 
+def _discover_projects_on_disk() -> List[str]:
+    """Return sorted list of available project names in storage."""
+    if not STORAGE_PATH.exists():
+        return []
+
+    projects = []
+    for item in STORAGE_PATH.iterdir():
+        if not item.is_dir():
+            continue
+        if item.name.startswith('.'):
+            continue
+        if item.name == "chroma_db":
+            continue
+        projects.append(item.name)
+    return sorted(projects)
+
+
+def _infer_project_from_text(text: str) -> Optional[str]:
+    """
+    Attempt to infer the best matching project for the given text.
+    Returns project name if a confident match is found, otherwise None.
+    """
+    projects = _discover_projects_on_disk()
+    if not projects:
+        return None
+
+    text_lower = text.lower()
+    best_project = None
+    best_score = 0
+
+    for project in projects:
+        project_lower = project.lower()
+        variants = {
+            project_lower,
+            project_lower.replace('_', ' '),
+            project_lower.replace('-', ' ')
+        }
+
+        for variant in variants:
+            normalized = variant.strip()
+            if not normalized or len(normalized) < 3:
+                continue
+
+            score = len(normalized)
+            if ' ' in normalized:
+                if normalized in text_lower and score > best_score:
+                    best_project = project
+                    best_score = score
+            else:
+                pattern = r'\b{}\b'.format(re.escape(normalized))
+                if re.search(pattern, text_lower) and score > best_score:
+                    best_project = project
+                    best_score = score
+
+    return best_project
+
 @mcp.tool()
 def create_project(name: str) -> dict:
     """Create a new isolated project (workspace)."""
@@ -356,17 +413,7 @@ def create_project(name: str) -> dict:
 def list_projects() -> dict:
     """List all available projects (directories in storage)."""
     try:
-        if not STORAGE_PATH.exists():
-            return {"projects": [], "current_project": _current_project, "count": 0}
-            
-        # List subdirectories in storage/
-        projects = []
-        for item in STORAGE_PATH.iterdir():
-            if item.is_dir() and not item.name.startswith('.'):
-                # Filter out legacy 'chroma_db' folder if it exists at root from old version
-                if item.name == "chroma_db": continue 
-                projects.append(item.name)
-                
+        projects = _discover_projects_on_disk()
         return {
             "projects": sorted(projects),
             "current_project": _current_project,
@@ -550,7 +597,11 @@ def _retrieve_nodes(
     if use_hyde:
         search_query = _generate_hyde_query(question)
 
-    index = get_index()
+    inferred_project = _infer_project_from_text(question)
+    if inferred_project and inferred_project != _current_project:
+        logger.info(f"Auto-selecting project '{inferred_project}' for query: {question[:80]}")
+
+    index = get_index(inferred_project)
 
     # Determine candidate count (fetch more if reranking)
     initial_top_k = similarity_top_k

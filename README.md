@@ -119,6 +119,7 @@ File size limit: 300MB per file
 ### Advanced Features
 - **Multi-Project**: Isolate indexes.
   - `create_project(name)`, `switch_project(name)`, `list_projects()`
+- **Smart Project Routing**: Queries auto-select a project when its name appears in the prompt.
 - **Smart Splitting**: Automatically uses AST (tree-sitter) for code and sentence splitting for docs.
 
 ### Management
@@ -156,6 +157,7 @@ Docs → Text Splitter ┴→ Vector       ↓
 2. `switch_project("backend")`
 3. Index backend files.
 4. Switch to "frontend" to keep contexts clean.
+5. Or just ask about "frontend" directly—queries mentioning a project name auto-route.
 
 ## Reranking
 
