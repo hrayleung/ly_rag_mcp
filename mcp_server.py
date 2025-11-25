@@ -131,27 +131,89 @@ def _should_ingest_file(path: Path):
 
 
 def _prepend_filename_to_document(doc: Document) -> Document:
-    """Prefix document text with its filename to improve retrieval on titles."""
+    """
+    Prefix document text with its directory context and filename.
+    Implements 'Context Injection' to help RAG understand folder structures.
+    Handles local files and URLs.
+    """
     try:
-        file_path = (
+        source_val = (
             doc.metadata.get("file_path")
             or doc.metadata.get("relative_path")
             or doc.metadata.get("source")
         )
-        if not file_path:
+        if not source_val:
             return doc
 
-        file_name = Path(file_path).name or str(file_path)
-        prefix = f"Filename: {file_name}\n\n"
+        source_str = str(source_val)
+        context_str = ""
+        item_name = ""
 
+        # Check if it looks like a URL
+        if source_str.startswith(("http://", "https://")):
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(source_str)
+                # context = domain + path (minus last segment)
+                path_parts = parsed.path.strip("/").split("/")
+                item_name = path_parts[-1] if path_parts and path_parts[-1] else "index"
+                
+                # Context is domain + parent folders
+                ctx_parts = [parsed.netloc] + path_parts[:-1]
+                context_str = " / ".join(ctx_parts)
+            except:
+                item_name = source_str
+        else:
+            # Handle as Local File
+            path_obj = Path(source_str)
+            item_name = path_obj.name or source_str
+            
+            # 1. Determine Root for Relative Path
+            root_path = (
+                doc.metadata.get("source_directory") 
+                or doc.metadata.get("codebase_root")
+                or doc.metadata.get("root_path")
+            )
+
+            context_parts = []
+            if root_path:
+                try:
+                    rel_path = path_obj.relative_to(root_path)
+                    context_parts = list(rel_path.parent.parts)
+                except ValueError:
+                    pass
+            
+            if not context_parts:
+                # Heuristic: Use last 2 parent directories
+                parents = list(path_obj.parent.parts)
+                parents = [p for p in parents if p and p not in ('/', '\\')]
+                if len(parents) >= 2:
+                    context_parts = parents[-2:]
+                elif len(parents) == 1:
+                    context_parts = parents
+
+            context_parts = [p for p in context_parts if p != "."]
+            context_str = " / ".join(context_parts)
+        
+        # Construct Prefix
+        prefix = ""
+        if context_str:
+            prefix += f"Context: {context_str}\n"
+        prefix += f"Filename: {item_name}\n\n"
+
+        # Apply to Text
         text = getattr(doc, "text", "")
-        if text and not text.startswith(prefix):
+        if text and not text.startswith("Context: ") and not text.startswith("Filename: "):
             doc.text = prefix + text
 
-        doc.metadata.setdefault("filename", file_name)
+        # Update Metadata
+        doc.metadata.setdefault("filename", item_name)
+        if context_str:
+            doc.metadata["folder_context"] = context_str
+            
         return doc
     except Exception as exc:
-        logger.debug(f"Unable to prepend filename for document: {exc}")
+        logger.debug(f"Unable to prepend context/filename for document: {exc}")
         return doc
 
 # ... (get_index and other helpers)
@@ -1305,6 +1367,7 @@ def add_document_from_text(text: str, metadata: dict = None) -> dict:
         doc_metadata['added_at'] = datetime.now().isoformat()
 
         document = Document(text=text, metadata=doc_metadata)
+        document = _prepend_filename_to_document(document)
 
         # Add to index with chunking
         index = get_index()
@@ -1550,6 +1613,7 @@ def crawl_website(url: str, max_depth: int = 1, max_pages: int = 10) -> dict:
         text_splitter = Settings.text_splitter
         nodes = []
         for doc in documents:
+            doc = _prepend_filename_to_document(doc)
             nodes.extend(text_splitter.get_nodes_from_documents([doc]))
             
         index.insert_nodes(nodes)

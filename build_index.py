@@ -220,6 +220,43 @@ def build_index(data_dir: str = "./data", rebuild: bool = False):
             cleaned = ''.join(char for char in cleaned if char.isprintable() or char in '\n\t ')
 
             if len(cleaned.strip()) > 10:
+                # --- Context Injection Logic ---
+                # Prepend folder context and filename to text
+                file_path_str = doc.metadata.get('file_path')
+                if file_path_str:
+                    path_obj = Path(file_path_str)
+                    file_name = path_obj.name
+                    
+                    # Try to calculate relative path from the indexed root (data_path)
+                    try:
+                        # data_path is available in local scope
+                        rel_path = path_obj.relative_to(data_path)
+                        context_parts = list(rel_path.parent.parts)
+                    except ValueError:
+                        # Fallback: Use last 2 parent folders
+                        parents = list(path_obj.parent.parts)
+                        context_parts = [p for p in parents if p and p not in ('/', '\\')]
+                        if len(parents) >= 2:
+                            context_parts = parents[-2:]
+                        
+                    # Filter noise
+                    context_parts = [p for p in context_parts if p and p != "."]
+                    context_str = " / ".join(context_parts)
+                    
+                    prefix = ""
+                    if context_str:
+                        prefix += f"Context: {context_str}\n"
+                    prefix += f"Filename: {file_name}\n\n"
+                    
+                    if not cleaned.startswith("Context: "):
+                        cleaned = prefix + cleaned
+                        
+                    # Add to metadata so it gets picked up by clean_metadata loop below
+                    doc.metadata['filename'] = file_name
+                    if context_str:
+                        doc.metadata['folder_context'] = context_str
+                # -------------------------------
+
                 # Clean metadata - ChromaDB only accepts str, int, float, None
                 clean_metadata = {}
                 for key, value in doc.metadata.items():
