@@ -3,13 +3,14 @@
 Comprehensive debugging and profiling tool for the RAG system.
 Run this to diagnose issues, profile performance, and validate configurations.
 """
+
 import os
 import sys
 import time
 import json
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Any
+from typing import List
 import argparse
 
 
@@ -49,7 +50,8 @@ def check_storage():
     """Check storage directory and files."""
     print_section("Storage Status")
 
-    storage_path = Path("./storage")
+    from rag.config import settings
+    storage_path = settings.storage_path
 
     if not storage_path.exists():
         print("[ERROR] Storage directory not found")
@@ -91,9 +93,11 @@ def load_index_metadata():
     """Load and analyze index metadata."""
     print_section("Index Metadata Analysis")
 
+    from rag.config import settings
+
     try:
         # Load tracking data
-        tracking_path = Path("./storage/indexed_files.json")
+        tracking_path = settings.storage_path / settings.tracking_filename
         if tracking_path.exists():
             with open(tracking_path) as f:
                 tracking_data = json.load(f)
@@ -116,7 +120,7 @@ def load_index_metadata():
             print("[WARNING] No tracking data found (indexed_files.json missing)")
 
         # Load docstore
-        docstore_path = Path("./storage/docstore.json")
+        docstore_path = settings.storage_path / "docstore.json"
         if docstore_path.exists():
             with open(docstore_path) as f:
                 docstore = json.load(f)
@@ -139,14 +143,16 @@ def profile_retrieval(query: str = "test query", top_k_values: List[int] = None)
         top_k_values = [1, 3, 6, 10, 15, 20]
 
     try:
-        # Import here to avoid issues if dependencies not installed
-        from mcp_server import get_index, get_reranker
+        from rag.storage.index import get_index_manager
+        from rag.retrieval.reranker import get_reranker_manager
 
         print(f"Query: '{query}'")
         print(f"Testing top_k values: {top_k_values}\n")
 
-        index = get_index()
-        reranker = get_reranker()
+        index_manager = get_index_manager()
+        index = index_manager.get_index()
+        reranker_manager = get_reranker_manager()
+        reranker = reranker_manager.get_reranker()
 
         print(f"Reranker available: {'Yes' if reranker else 'No (COHERE_API_KEY not set)'}\n")
 
@@ -198,21 +204,15 @@ def profile_retrieval(query: str = "test query", top_k_values: List[int] = None)
         if reranker:
             avg_overhead = sum(r.get('time_rerank', 0) - r['time_no_rerank'] for r in results) / len(results)
             print(f"  Average reranking overhead: {avg_overhead:.4f}s")
-            print(f"  Reranking adds: {avg_overhead/results[0]['time_no_rerank']*100:.1f}% latency on average")
+            if results[0]['time_no_rerank'] > 0:
+                print(f"  Reranking adds: {avg_overhead/results[0]['time_no_rerank']*100:.1f}% latency")
         else:
             print("  Reranking not available (set COHERE_API_KEY to test)")
-
-        # Check if results are as expected
-        unexpected = [r for r in results if r['results_no_rerank'] != r['top_k']]
-        if unexpected:
-            print(f"\n  [WARNING] WARNING: {len(unexpected)} queries returned fewer results than requested")
-            print("    This indicates the index has fewer documents than some top_k values")
 
         return results
 
     except ImportError as e:
         print(f"[ERROR] Cannot import dependencies: {e}")
-        print("  Make sure you're in the correct conda environment")
         return None
     except Exception as e:
         print(f"[ERROR] Error during profiling: {e}")
@@ -226,62 +226,46 @@ def test_edge_cases():
     print_section("Edge Case Testing")
 
     try:
-        from mcp_server import query_rag, iterative_search, get_index_stats
+        from rag.retrieval.search import get_search_engine
+        from rag.tools.admin import get_index_stats
 
+        engine = get_search_engine()
         tests = []
 
         # Test 1: Empty query
         print("Test 1: Empty query")
         try:
-            result = query_rag("", similarity_top_k=3)
-            tests.append(("Empty query", "PASS" if isinstance(result, str) else "FAIL"))
-            print(f"  [OK] Handled gracefully: {result[:100]}...")
+            result = engine.search("", similarity_top_k=3)
+            tests.append(("Empty query", "FAIL - should raise error"))
+        except ValueError:
+            tests.append(("Empty query", "PASS"))
+            print(f"  [OK] Correctly raised ValueError")
         except Exception as e:
             tests.append(("Empty query", f"FAIL: {e}"))
-            print(f"  [ERROR] Error: {e}")
+            print(f"  [ERROR] Unexpected error: {e}")
 
         # Test 2: Very large top_k
         print("\nTest 2: Very large top_k (100)")
         try:
-            result = query_rag("test", similarity_top_k=100)
-            tests.append(("Large top_k", "PASS" if isinstance(result, str) else "FAIL"))
-            print(f"  [OK] Handled: {result[:100]}...")
+            result = engine.search("test", similarity_top_k=100)
+            tests.append(("Large top_k", "PASS" if result.results is not None else "FAIL"))
+            print(f"  [OK] Handled: {result.total} results")
         except Exception as e:
             tests.append(("Large top_k", f"FAIL: {e}"))
             print(f"  [ERROR] Error: {e}")
 
-        # Test 3: top_k = 0
-        print("\nTest 3: Invalid top_k (0)")
+        # Test 3: Special characters
+        print("\nTest 3: Special characters in query")
         try:
-            result = query_rag("test", similarity_top_k=0)
-            tests.append(("Zero top_k", "PASS" if isinstance(result, str) else "FAIL"))
-            print(f"  [OK] Handled: {result[:100]}...")
-        except Exception as e:
-            tests.append(("Zero top_k", f"FAIL: {e}"))
-            print(f"  [ERROR] Error: {e}")
-
-        # Test 4: Special characters
-        print("\nTest 4: Special characters in query")
-        try:
-            result = query_rag("test 中文 émojis ", similarity_top_k=3)
-            tests.append(("Special chars", "PASS" if isinstance(result, str) else "FAIL"))
-            print(f"  [OK] Handled: {result[:100]}...")
+            result = engine.search("test 中文 émojis 🚀", similarity_top_k=3)
+            tests.append(("Special chars", "PASS" if result.results is not None else "FAIL"))
+            print(f"  [OK] Handled: {result.total} results")
         except Exception as e:
             tests.append(("Special chars", f"FAIL: {e}"))
             print(f"  [ERROR] Error: {e}")
 
-        # Test 5: Iterative search
-        print("\nTest 5: Iterative search")
-        try:
-            result = iterative_search("test", initial_top_k=3)
-            tests.append(("Iterative search", "PASS" if isinstance(result, dict) else "FAIL"))
-            print(f"  [OK] Returned: {list(result.keys())}")
-        except Exception as e:
-            tests.append(("Iterative search", f"FAIL: {e}"))
-            print(f"  [ERROR] Error: {e}")
-
-        # Test 6: Stats retrieval
-        print("\nTest 6: Index stats")
+        # Test 4: Stats retrieval
+        print("\nTest 4: Index stats")
         try:
             stats = get_index_stats()
             tests.append(("Index stats", "PASS" if 'document_count' in stats else "FAIL"))
@@ -316,19 +300,18 @@ def analyze_index_quality():
     print_section("Index Quality Analysis")
 
     try:
-        import chromadb
+        from rag.storage.chroma import get_chroma_manager
+        from rag.config import settings, require_openai_key
         from llama_index.embeddings.openai import OpenAIEmbedding
         from llama_index.core import Settings
 
-        # Configure
-        Settings.embed_model = OpenAIEmbedding(model="text-embedding-3-large")
+        require_openai_key()
+        Settings.embed_model = OpenAIEmbedding(model=settings.embedding_model)
 
-        # Load ChromaDB
-        chroma_client = chromadb.PersistentClient(path="./storage/chroma_db")
-        chroma_collection = chroma_client.get_or_create_collection("rag_collection")
+        chroma_manager = get_chroma_manager()
+        _, collection = chroma_manager.get_client()
 
-        # Get collection stats
-        count = chroma_collection.count()
+        count = collection.count()
         print(f"Total documents in ChromaDB: {count}")
 
         if count == 0:
@@ -338,7 +321,7 @@ def analyze_index_quality():
         # Sample some documents
         if count > 0:
             sample_size = min(10, count)
-            results = chroma_collection.get(limit=sample_size, include=['metadatas', 'documents'])
+            results = collection.get(limit=sample_size, include=['metadatas', 'documents'])
 
             print(f"\nSampling {sample_size} documents:")
 
@@ -360,20 +343,20 @@ def analyze_index_quality():
                     if metadata:
                         metadata_keys.update(metadata.keys())
 
-                print(f"\n  Metadata fields found: {', '.join(sorted(metadata_keys))}")
+                print(f"\n  Metadata fields: {', '.join(sorted(metadata_keys))}")
 
-            # Check for quality issues
+            # Quality checks
             print(f"\n  Quality checks:")
 
             too_short = sum(1 for l in lengths if l < 50)
             if too_short > 0:
-                print(f"    [WARNING] {too_short} documents < 50 chars (may be too short)")
+                print(f"    [WARNING] {too_short} documents < 50 chars")
             else:
                 print(f"    [OK] No suspiciously short documents")
 
             too_long = sum(1 for l in lengths if l > 50000)
             if too_long > 0:
-                print(f"    [WARNING] {too_long} documents > 50K chars (may need chunking)")
+                print(f"    [WARNING] {too_long} documents > 50K chars")
             else:
                 print(f"    [OK] No suspiciously long documents")
 

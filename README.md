@@ -163,6 +163,12 @@ Docs → Text Splitter ┴→ Vector       ↓
 4. Switch to "frontend" to keep contexts clean.
 5. Or just ask about "frontend" directly—queries mentioning a project name auto-route, and the server falls back to the most relevant project when nothing is explicit.
 
+### Project Metadata & Routing
+- Run `list_projects()` to see each workspace’s `details` (display name, keywords, default paths, last indexed timestamp). Keep these hints current so the LLM can route reliably.
+- Before indexing a new repo, call `inspect_directory(<path>)`, confirm the suggested name, then `create_project`/`switch_project` followed by `set_project_metadata(project="frontend", keywords=["nextjs","api"], description="Customer portal")`.
+- If you are unsure which workspace to query, call `choose_project(question="<user request>")` to see scored candidates and their reasoning before invoking `query_rag`.
+- Ingestion tools automatically update `default_paths` and `last_indexed` metadata, so repeated queries have better context; add manual keywords when the directory name isn’t descriptive.
+
 ## Reranking
 
 
@@ -233,18 +239,47 @@ model="rerank-3-nimble"  # Faster alternative
 
 ```
 ly_rag_mcp/
-├── build_index.py          # Index builder with incremental update support
-├── mcp_server.py           # FastMCP server
+├── mcp_server.py           # FastMCP server entry point
+├── build_index.py          # CLI index builder
 ├── verify_setup.py         # Setup verification
+├── debug_rag.py            # Debug & profiling tool
+├── rag/                    # Core package (modular architecture)
+│   ├── __init__.py
+│   ├── config.py           # Centralized settings & constants
+│   ├── models.py           # Data models (SearchMode, ProjectMetadata, etc.)
+│   ├── storage/            # Storage layer
+│   │   ├── chroma.py       # ChromaDB client management
+│   │   └── index.py        # LlamaIndex storage management
+│   ├── retrieval/          # Retrieval layer
+│   │   ├── search.py       # Unified search engine
+│   │   ├── reranker.py     # Cohere reranking
+│   │   ├── bm25.py         # BM25 keyword search
+│   │   └── hyde.py         # HyDE query augmentation
+│   ├── ingestion/          # Ingestion layer
+│   │   ├── loader.py       # Document loading
+│   │   ├── processor.py    # Document cleaning & enrichment
+│   │   └── chunker.py      # Smart chunking (code/text)
+│   ├── project/            # Project management
+│   │   ├── manager.py      # Multi-project isolation
+│   │   └── metadata.py     # Project metadata & manifests
+│   └── tools/              # MCP tool definitions
+│       ├── query.py        # Search & retrieval tools
+│       ├── ingest.py       # Document ingestion tools
+│       └── admin.py        # Admin & management tools
 ├── .env.example            # Environment template
-├── .gitignore              # Git ignore
-├── README.md               # This file
-├── data/                   # Documents (excluded from git)
-└── storage/                # Generated index (excluded from git)
-    ├── chroma_db/          # Vector database
-    ├── indexed_files.json  # Tracking file for incremental updates
-    └── *.json              # Index metadata
+├── data/                   # Documents (git-ignored)
+└── storage/                # Generated indexes (git-ignored)
+    └── {project}/          # Per-project isolation
+        ├── chroma_db/      # Vector database
+        └── *.json          # Index metadata
 ```
+
+### Architecture Benefits
+
+- **Modular**: Each module has a single responsibility
+- **Testable**: Clean interfaces for unit testing
+- **Maintainable**: ~200-300 lines per file vs 3000+ monolith
+- **Extensible**: Easy to add new retrievers, chunkers, or tools
 
 ## Troubleshooting
 

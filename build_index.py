@@ -2,13 +2,20 @@
 """
 Build a local RAG database using LlamaIndex and OpenAI embeddings.
 Supports incremental updates to minimize API token usage.
+
+Usage:
+  python build_index.py                              # Incremental update of ./data
+  python build_index.py /path/to/documents           # Incremental update of custom directory
+  python build_index.py --rebuild                    # Force full rebuild of ./data
+  python build_index.py /path/to/docs --rebuild      # Force full rebuild of custom directory
 """
-import os
+
 import sys
 import json
 import argparse
 from pathlib import Path
 from datetime import datetime
+
 from llama_index.core import (
     VectorStoreIndex,
     SimpleDirectoryReader,
@@ -22,6 +29,14 @@ from llama_index.embeddings.openai import OpenAIEmbedding
 import chromadb
 from llama_index.vector_stores.chroma import ChromaVectorStore
 
+# Import from new package structure
+from rag.config import (
+    settings, logger, require_openai_key,
+    ALLOWED_EXTENSIONS, SUPPORTED_CODE_EXTS, SUPPORTED_DOC_EXTS
+)
+from rag.ingestion.processor import DocumentProcessor
+from rag.ingestion.chunker import get_splitter_for_file
+
 
 TRACKING_FILE = "./storage/indexed_files.json"
 
@@ -34,7 +49,7 @@ def load_tracking_data():
     try:
         with open(TRACKING_FILE, 'r') as f:
             return json.load(f)
-    except:
+    except Exception:
         return {}
 
 
@@ -65,7 +80,6 @@ def is_file_changed(file_path, tracking_data):
     current_meta = get_file_metadata(file_path)
     stored_meta = tracking_data[file_key]
 
-    # Check if modified
     if current_meta['mtime'] != stored_meta['mtime'] or \
        current_meta['size'] != stored_meta['size']:
         return True
@@ -82,20 +96,13 @@ def build_index(data_dir: str = "./data", rebuild: bool = False):
         rebuild: If True, rebuild entire index from scratch
     """
     # Check for OpenAI API key
-    if not os.getenv("OPENAI_API_KEY"):
-        raise ValueError(
-            "OPENAI_API_KEY not found in environment variables.\n"
-            "Please set it: export OPENAI_API_KEY='your-api-key'"
-        )
+    require_openai_key()
 
     # Configure LlamaIndex settings
-    Settings.embed_model = OpenAIEmbedding(model="text-embedding-3-large")
-
-    # Configure text splitter to handle large documents
-    # chunk_size=1024 tokens (~4000 chars), overlap=200 chars for context continuity
+    Settings.embed_model = OpenAIEmbedding(model=settings.embedding_model)
     Settings.text_splitter = SentenceSplitter(
-        chunk_size=1024,
-        chunk_overlap=200,
+        chunk_size=settings.chunk_size,
+        chunk_overlap=settings.chunk_overlap,
     )
 
     # Validate data directory
@@ -113,26 +120,6 @@ def build_index(data_dir: str = "./data", rebuild: bool = False):
         print(f"Warning: Directory is empty: {data_path}")
         sys.exit(1)
 
-    # Define supported file extensions
-    SUPPORTED_EXTS = {
-        # Documents
-        '.txt', '.pdf', '.docx', '.md', '.epub',
-        '.ppt', '.pptx', '.pptm',
-        '.csv', '.json', '.xml',
-        '.ipynb', '.html',
-        '.jpg', '.jpeg', '.png',
-        '.hwp', '.mbox',
-        # Code files
-        '.py', '.js', '.ts', '.jsx', '.tsx',
-        '.java', '.cpp', '.c', '.h', '.hpp',
-        '.cs', '.go', '.rs', '.rb', '.php',
-        '.swift', '.kt', '.scala', '.r',
-        '.sh', '.bash', '.zsh',
-        '.sql', '.yaml', '.yml', '.toml',
-        '.dockerfile', '.makefile',
-        '.vue', '.svelte', '.astro'
-    }
-
     # Scan directory for all files
     all_files = []
     for item in data_path.rglob('*'):
@@ -145,7 +132,7 @@ def build_index(data_dir: str = "./data", rebuild: bool = False):
 
     for file_path in all_files:
         ext = file_path.suffix.lower()
-        if ext in SUPPORTED_EXTS:
+        if ext in ALLOWED_EXTENSIONS:
             supported_files.append(file_path)
         else:
             unsupported_files.append(file_path)
@@ -160,7 +147,7 @@ def build_index(data_dir: str = "./data", rebuild: bool = False):
 
     if not supported_files:
         print(f"\nError: No supported files found in {data_path}")
-        print(f"Supported formats: {', '.join(sorted(SUPPORTED_EXTS))}")
+        print(f"Supported formats: {', '.join(sorted(ALLOWED_EXTENSIONS))}")
         sys.exit(1)
 
     # Incremental update logic
@@ -204,100 +191,25 @@ def build_index(data_dir: str = "./data", rebuild: bool = False):
 
     print(f"Loaded {len(documents)} documents")
 
-    # Clean document text
-    print("Cleaning document encoding...")
-    cleaned_documents = []
-
-    for doc in documents:
-        try:
-            content = doc.get_content()
-
-            try:
-                cleaned = content.encode('utf-8', errors='surrogateescape').decode('utf-8', errors='ignore')
-            except:
-                cleaned = content.encode('utf-8', errors='replace').decode('utf-8')
-
-            cleaned = ''.join(char for char in cleaned if char.isprintable() or char in '\n\t ')
-
-            if len(cleaned.strip()) > 10:
-                # --- Context Injection Logic ---
-                # Prepend folder context and filename to text
-                file_path_str = doc.metadata.get('file_path')
-                if file_path_str:
-                    path_obj = Path(file_path_str)
-                    file_name = path_obj.name
-                    
-                    # Try to calculate relative path from the indexed root (data_path)
-                    try:
-                        # data_path is available in local scope
-                        rel_path = path_obj.relative_to(data_path)
-                        context_parts = list(rel_path.parent.parts)
-                    except ValueError:
-                        # Fallback: Use last 2 parent folders
-                        parents = list(path_obj.parent.parts)
-                        context_parts = [p for p in parents if p and p not in ('/', '\\')]
-                        if len(parents) >= 2:
-                            context_parts = parents[-2:]
-                        
-                    # Filter noise
-                    context_parts = [p for p in context_parts if p and p != "."]
-                    context_str = " / ".join(context_parts)
-                    
-                    prefix = ""
-                    if context_str:
-                        prefix += f"Context: {context_str}\n"
-                    prefix += f"Filename: {file_name}\n\n"
-                    
-                    if not cleaned.startswith("Context: "):
-                        cleaned = prefix + cleaned
-                        
-                    # Add to metadata so it gets picked up by clean_metadata loop below
-                    doc.metadata['filename'] = file_name
-                    if context_str:
-                        doc.metadata['folder_context'] = context_str
-                # -------------------------------
-
-                # Clean metadata - ChromaDB only accepts str, int, float, None
-                clean_metadata = {}
-                for key, value in doc.metadata.items():
-                    if isinstance(value, (str, int, float, type(None))):
-                        clean_metadata[key] = value
-                    elif isinstance(value, bool):
-                        clean_metadata[key] = str(value)
-                    elif isinstance(value, (list, dict)):
-                        # Skip complex types that ChromaDB doesn't support
-                        continue
-                    else:
-                        # Convert other types to string
-                        clean_metadata[key] = str(value)
-
-                new_doc = Document(
-                    text=cleaned,
-                    metadata=clean_metadata,
-                    excluded_llm_metadata_keys=doc.excluded_llm_metadata_keys,
-                    excluded_embed_metadata_keys=doc.excluded_embed_metadata_keys,
-                )
-                cleaned_documents.append(new_doc)
-
-        except Exception as e:
-            print(f"Warning: Skipping problematic document: {e}")
-            continue
+    # Process documents using the new processor
+    print("Processing documents...")
+    processor = DocumentProcessor()
+    cleaned_documents = processor.process_documents(documents, data_path)
 
     skipped = len(documents) - len(cleaned_documents)
     documents = cleaned_documents
-    print(f"After cleaning: {len(documents)} valid documents ({skipped} skipped)")
+    print(f"After processing: {len(documents)} valid documents ({skipped} skipped)")
 
     if not documents:
         print("No valid documents to index!")
         return
 
-    # Check for large documents that will be chunked
+    # Check for large documents
     large_docs = [doc for doc in documents if len(doc.text) > 10000]
     if large_docs:
         total_chars = sum(len(doc.text) for doc in large_docs)
-        print(f"\n[INFO] {len(large_docs)} large document(s) detected ({total_chars:,} total chars)")
-        print(f"   Will be automatically chunked into smaller pieces (1024 tokens/chunk)")
-        print(f"   This prevents 'max tokens per request' errors")
+        print(f"\n[INFO] {len(large_docs)} large document(s) ({total_chars:,} chars)")
+        print(f"   Will be chunked into smaller pieces")
 
     # Initialize ChromaDB
     print("Initializing ChromaDB...")
@@ -305,7 +217,6 @@ def build_index(data_dir: str = "./data", rebuild: bool = False):
 
     chroma_client = chromadb.PersistentClient(path="./storage/chroma_db")
     chroma_collection = chroma_client.get_or_create_collection("rag_collection")
-
     vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
 
     # Load existing index or create new one
@@ -317,18 +228,16 @@ def build_index(data_dir: str = "./data", rebuild: bool = False):
         )
         index = load_index_from_storage(storage_context)
 
-        # Insert new documents in batch (much faster than one-by-one)
+        # Create nodes with smart chunking
         print(f"Adding {len(documents)} new document(s) to existing index...")
-
-        # Use the configured text splitter to chunk documents properly
-        text_splitter = Settings.text_splitter
         nodes = []
         for doc in documents:
-            # Split document into chunks if needed
-            doc_nodes = text_splitter.get_nodes_from_documents([doc])
+            file_path = doc.metadata.get('file_path', '')
+            splitter = get_splitter_for_file(file_path)
+            doc_nodes = splitter.get_nodes_from_documents([doc])
             nodes.extend(doc_nodes)
 
-        print(f"Created {len(nodes)} node(s) from {len(documents)} document(s) (with chunking)")
+        print(f"Created {len(nodes)} node(s) from {len(documents)} document(s)")
         index.insert_nodes(nodes, show_progress=True)
     else:
         # Create new index
