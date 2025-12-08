@@ -72,11 +72,19 @@ def register_query_tools(mcp):
                 if len(projects) > 1:
                     # Multiple projects - use smart routing
                     routing = pm.choose_project(question, max_candidates=1)
-                    if "recommendation" in routing and routing["recommendation"]:
-                        selected_project = routing["recommendation"]["project"]
-                        score = routing["recommendation"]["score"]
-                        routing_info = f" [auto-routed to '{selected_project}' (confidence: {score:.1f})]"
-                        logger.info(f"Auto-routed query to project: {selected_project} (score: {score})")
+                    if not routing.get("error") and routing.get("recommendation"):
+                        rec = routing["recommendation"]
+                        # Handle both dict and string formats
+                        if isinstance(rec, dict):
+                            selected_project = rec.get("project")
+                            score = rec.get("score", 0)
+                        else:
+                            selected_project = rec
+                            score = 0
+                        
+                        if selected_project:
+                            routing_info = f" [auto-routed to '{selected_project}' (confidence: {score:.1f})]"
+                            logger.info(f"Auto-routed query to project: {selected_project} (score: {score})")
                 elif len(projects) == 1:
                     selected_project = projects[0]
                     routing_info = f" [project: {selected_project}]"
