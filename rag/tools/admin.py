@@ -1,260 +1,163 @@
 """
-Administration and management MCP tools.
+Admin and management MCP tools.
 """
-
-import shutil
-from pathlib import Path
 
 from rag.config import settings, logger
 from rag.storage.index import get_index_manager
 from rag.storage.chroma import get_chroma_manager
 from rag.project.manager import get_project_manager
-from rag.project.metadata import get_metadata_manager
-from rag.retrieval.reranker import get_reranker_manager
-from rag.retrieval.bm25 import get_bm25_manager
 
 
 def register_admin_tools(mcp):
-    """Register administration MCP tools."""
+    """Register admin MCP tools."""
     
     @mcp.tool()
-    def create_project(name: str) -> dict:
-        """Create a new isolated project (workspace)."""
-        return get_project_manager().create_project(name)
-    
-    @mcp.tool()
-    def list_projects() -> dict:
-        """List all available projects."""
-        return get_project_manager().list_projects()
-    
-    @mcp.tool()
-    def switch_project(name: str) -> dict:
-        """Switch the active workspace."""
-        return get_project_manager().switch_project(name)
-    
-    @mcp.tool()
-    def set_project_metadata(
-        project: str,
-        display_name: str = None,
-        description: str = None,
-        keywords: list = None,
-        default_paths: list = None
+    def manage_project(
+        action: str,
+        project: str = None,
+        keywords: list[str] = None,
+        description: str = None
     ) -> dict:
         """
-        Define metadata for better query routing.
+        Manage projects (workspaces).
         
         Args:
-            project: Project name.
-            display_name: Human-readable name.
-            description: Project description.
-            keywords: Search keywords.
-            default_paths: Default source paths.
+            action: 'list', 'create', 'switch', 'set_metadata', or 'choose'
+            project: Project name (required for create/switch/set_metadata)
+            keywords: Keywords for routing (for set_metadata)
+            description: Project description (for set_metadata)
+        
+        Examples:
+            manage_project(action='list')
+            manage_project(action='create', project='backend')
+            manage_project(action='switch', project='frontend')
+            manage_project(action='set_metadata', project='api', keywords=['rest','graphql'], description='API docs')
         """
         try:
-            manager = get_project_manager()
+            pm = get_project_manager()
             
-            if not manager.project_exists(project):
+            if action == "list":
+                projects = pm.list_projects()
                 return {
-                    "error": "project_not_found",
-                    "available": manager.discover_projects()
+                    "projects": projects,
+                    "current": get_index_manager().current_project
                 }
             
-            metadata_mgr = get_metadata_manager()
-            metadata = metadata_mgr.update(
-                project=project,
-                display_name=display_name,
-                description=description,
-                keywords=keywords,
-                default_paths=default_paths
-            )
+            elif action == "create":
+                if not project:
+                    return {"error": "project name required"}
+                pm.create_project(project)
+                return {"success": f"Created project: {project}"}
+            
+            elif action == "switch":
+                if not project:
+                    return {"error": "project name required"}
+                get_index_manager().switch_project(project)
+                return {"success": f"Switched to: {project}"}
+            
+            elif action == "set_metadata":
+                if not project:
+                    return {"error": "project name required"}
+                pm.set_project_metadata(project, keywords or [], description)
+                return {"success": f"Updated metadata for: {project}"}
+            
+            elif action == "choose":
+                if not description:
+                    return {"error": "description/question required for choosing"}
+                result = pm.choose_project(description)
+                return result
+            
+            else:
+                return {"error": f"Unknown action: {action}. Use: list, create, switch, set_metadata, choose"}
+                
+        except Exception as e:
+            logger.error(f"Project management error: {e}", exc_info=True)
+            return {"error": str(e)}
+    
+    @mcp.tool()
+    def get_stats(stat_type: str = "index") -> dict:
+        """
+        Get system statistics.
+        
+        Args:
+            stat_type: 'index' (default) or 'cache'
+        """
+        try:
+            if stat_type == "cache":
+                stats = get_index_manager().stats
+                return {
+                    "index_loads": stats.index_loads,
+                    "index_cache_hits": stats.index_cache_hits,
+                    "cache_hit_rate": f"{stats.cache_hit_rate:.1%}"
+                }
+            
+            # Default: index stats
+            if not settings.storage_path.exists():
+                return {"error": "Index not found"}
             
             return {
-                "success": True,
-                "project": project,
-                "metadata": metadata.to_dict()
+                "status": "ready",
+                "documents": get_chroma_manager().get_collection_count(),
+                "current_project": get_index_manager().current_project,
+                "embedding_provider": settings.embedding_provider,
+                "embedding_model": settings.embedding_model
             }
+            
         except Exception as e:
             return {"error": str(e)}
     
     @mcp.tool()
-    def choose_project(question: str, max_candidates: int = 3) -> dict:
+    def list_documents(project: str = None, limit: int = 50) -> dict:
         """
-        Score available projects for a query without executing retrieval.
+        List indexed documents.
         
         Args:
-            question: User query to evaluate.
-            max_candidates: Maximum candidates to return.
+            project: Project name (optional, uses current)
+            limit: Max documents to return (default: 50)
         """
-        return get_project_manager().choose_project(question, max_candidates)
-    
-    @mcp.tool()
-    def get_index_stats() -> dict:
-        """Get RAG index statistics."""
         try:
-            if not settings.storage_path.exists():
-                return {"error": "Index not found. Run build_index.py first."}
+            index = get_index_manager().get_index(project)
+            docstore = getattr(index, "docstore", None)
+            if not docstore:
+                return {"documents": [], "message": "No docstore available"}
             
-            chroma_manager = get_chroma_manager()
-            count = chroma_manager.get_collection_count()
-            index_manager = get_index_manager()
+            docs = getattr(docstore, "docs", {}) or {}
+            doc_list = []
             
-            return {
-                "status": "ready",
-                "document_count": count,
-                "current_project": index_manager.current_project,
-                "storage_location": str(settings.storage_path),
-                "embedding_model": settings.embedding_model
-            }
-        except Exception as e:
-            return {"error": f"Error getting stats: {str(e)}"}
-    
-    @mcp.tool()
-    def get_cache_stats() -> dict:
-        """Get cache performance metrics."""
-        index_stats = get_index_manager().stats
-        chroma_stats = get_chroma_manager().stats
-        reranker_stats = get_reranker_manager().stats
-        bm25_stats = get_bm25_manager().stats
-        
-        # Combine stats
-        combined = {
-            "index": {
-                "loads": index_stats.index_loads,
-                "cache_hits": index_stats.index_cache_hits,
-                "hit_rate": f"{index_stats.get_hit_rate('index'):.1f}%"
-            },
-            "chroma": {
-                "loads": chroma_stats.chroma_loads,
-                "cache_hits": chroma_stats.chroma_cache_hits,
-                "hit_rate": f"{chroma_stats.get_hit_rate('chroma'):.1f}%"
-            },
-            "reranker": {
-                "loads": reranker_stats.reranker_loads,
-                "cache_hits": reranker_stats.reranker_cache_hits,
-                "hit_rate": f"{reranker_stats.get_hit_rate('reranker'):.1f}%"
-            },
-            "bm25": {
-                "builds": bm25_stats.bm25_builds,
-                "cache_hits": bm25_stats.bm25_cache_hits,
-                "hit_rate": f"{bm25_stats.get_hit_rate('bm25'):.1f}%"
-            }
-        }
-        
-        # Summary
-        min_rate = min(
-            index_stats.get_hit_rate('index'),
-            chroma_stats.get_hit_rate('chroma')
-        )
-        combined["summary"] = (
-            "Cache working well" if min_rate > 50 
-            else "Cache warming up"
-        )
-        
-        return combined
-    
-    @mcp.tool()
-    def list_indexed_documents() -> dict:
-        """List sample of indexed documents."""
-        try:
-            stats = get_index_stats()
-            if "error" in stats:
-                return stats
-            
-            count = stats.get("document_count", 0)
-            if count == 0:
-                return {
-                    "success": True,
-                    "document_count": 0,
-                    "documents": [],
-                    "message": "No documents in the index"
-                }
-            
-            index_manager = get_index_manager()
-            retriever = index_manager.get_retriever(similarity_top_k=10)
-            
-            from llama_index.core.schema import QueryBundle
-            query = QueryBundle(query_str="文档 内容 代码")
-            nodes = retriever.retrieve(query)
-            
-            docs = []
-            for i, node in enumerate(nodes, 1):
-                content = node.node.get_content()
-                docs.append({
-                    "index": i,
-                    "node_id": node.node.node_id,
-                    "text_preview": content[:150] + "..." if len(content) > 150 else content,
-                    "metadata": node.node.metadata,
-                    "text_length": len(content),
-                    "relevance_score": float(node.score) if node.score else None
+            for doc_id, doc in list(docs.items())[:limit]:
+                metadata = getattr(doc, "metadata", {}) or {}
+                doc_list.append({
+                    "id": doc_id[:16],
+                    "file": metadata.get("file_name", "unknown"),
+                    "type": metadata.get("file_type", "unknown"),
+                    "size": metadata.get("file_size", 0)
                 })
             
             return {
-                "success": True,
-                "document_count": count,
-                "documents_shown": len(docs),
-                "documents": docs,
-                "message": f"Showing {len(docs)} samples of {count} total"
+                "documents": doc_list,
+                "total": len(docs),
+                "showing": len(doc_list)
             }
+            
         except Exception as e:
-            return {"error": f"Error listing documents: {str(e)}"}
+            return {"error": str(e)}
     
     @mcp.tool()
-    def clear_index() -> dict:
-        """Clear all documents (DESTRUCTIVE)."""
+    def clear_index(project: str = None, confirm: bool = False) -> dict:
+        """
+        Clear the index (DESTRUCTIVE).
+        
+        Args:
+            project: Project to clear (optional, uses current)
+            confirm: Must be True to proceed
+        """
+        if not confirm:
+            return {"error": "Set confirm=True to proceed"}
+        
         try:
-            if settings.storage_path.exists():
-                shutil.rmtree(settings.storage_path)
-            
-            # Reset managers
+            target = project or get_index_manager().current_project
+            get_chroma_manager().clear_collection(target)
             get_index_manager().reset()
-            get_chroma_manager().reset()
-            get_bm25_manager().reset()
-            get_metadata_manager().clear_cache()
-            
-            # Reinitialize
-            get_index_manager().get_index()
-            
-            return {
-                "success": True,
-                "message": "Index cleared successfully"
-            }
+            return {"success": f"Cleared index for: {target}"}
         except Exception as e:
-            return {"error": f"Error clearing index: {str(e)}"}
-    
-    # MCP Resources
-    @mcp.resource("rag://documents")
-    def get_documents_resource() -> str:
-        """MCP Resource: List indexed documents."""
-        try:
-            result = list_indexed_documents()
-            if "error" in result:
-                return f"Error: {result['error']}"
-            
-            output = f"# Indexed Documents ({result['document_count']} total)\n\n"
-            for doc in result["documents"]:
-                output += f"## Document: {doc['node_id'][:8]}...\n"
-                output += f"**Preview:** {doc['text_preview']}\n"
-                output += f"**Length:** {doc['text_length']} chars\n"
-                if doc['metadata']:
-                    output += f"**Metadata:** {doc['metadata']}\n"
-                output += "\n---\n\n"
-            
-            return output
-        except Exception as e:
-            return f"Error: {str(e)}"
-    
-    @mcp.resource("rag://stats")
-    def get_stats_resource() -> str:
-        """MCP Resource: Get RAG statistics."""
-        try:
-            stats = get_index_stats()
-            if "error" in stats:
-                return f"Error: {stats['error']}"
-            
-            output = "# RAG Index Statistics\n\n"
-            for key, value in stats.items():
-                output += f"**{key}:** {value}\n"
-            
-            return output
-        except Exception as e:
-            return f"Error: {str(e)}"
+            return {"error": str(e)}
