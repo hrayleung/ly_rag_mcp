@@ -162,6 +162,28 @@ class ProjectManager:
             "count": len(projects)
         }
     
+    def set_project_metadata(
+        self,
+        project: str,
+        keywords: List[str] = None,
+        description: str = None
+    ) -> None:
+        """Update project metadata."""
+        metadata = self._metadata.load(project)
+        if keywords is not None:
+            metadata.keywords = keywords
+        if description is not None:
+            metadata.description = description
+        self._metadata.save(project, metadata)
+    
+    def update_project_paths(self, project: str, paths: List[str]) -> None:
+        """Update default paths for a project."""
+        metadata = self._metadata.load(project)
+        for path in paths:
+            if path not in metadata.default_paths:
+                metadata.default_paths.append(path)
+        self._metadata.save(project, metadata)
+    
     def require_project(
         self,
         action: str,
