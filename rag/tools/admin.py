@@ -19,35 +19,65 @@ def register_admin_tools(mcp):
         description: str = None
     ) -> dict:
         """
-        Manage projects (workspaces).
+        Manage projects (workspaces) for organizing different knowledge bases.
         
         Args:
-            action: 'list', 'create', 'switch', 'set_metadata', or 'choose'
-            project: Project name (required for create/switch/set_metadata)
-            keywords: Keywords for routing (for set_metadata)
-            description: Project description (for set_metadata)
+            action: Operation to perform:
+                - 'list': Show all projects with their metadata
+                - 'create': Create new project
+                - 'switch': Switch to different project
+                - 'update': Update project keywords/description for better routing
+                - 'analyze': Get routing suggestions for a query
+            project: Project name (required for create/switch/update)
+            keywords: Keywords for auto-routing (for update action)
+                      Examples: ['python', 'api'], ['frontend', 'react'], ['backend', 'database']
+            description: Human-readable description (for update action)
         
         Examples:
+            # List all projects with metadata
             manage_project(action='list')
-            manage_project(action='create', project='backend')
-            manage_project(action='switch', project='frontend')
-            manage_project(action='set_metadata', project='api', keywords=['rest','graphql'], description='API docs')
+            
+            # Create and configure a new project
+            manage_project(action='create', project='backend-api')
+            manage_project(action='update', project='backend-api', 
+                          keywords=['python', 'fastapi', 'rest', 'database'],
+                          description='Backend REST API documentation')
+            
+            # Test routing for a query
+            manage_project(action='analyze', description='How to setup FastAPI endpoints?')
+        
+        Note: Good keywords improve automatic project routing. Include:
+        - Technology names (python, react, aws)
+        - Domain terms (api, frontend, database)
+        - Project-specific terms (auth, payment, analytics)
         """
         try:
             pm = get_project_manager()
             
             if action == "list":
                 projects = pm.list_projects()
-                return {
-                    "projects": projects,
-                    "current": get_index_manager().current_project
-                }
+                current = get_index_manager().current_project
+                
+                result = {"projects": [], "current": current}
+                for proj in projects:
+                    metadata = pm._metadata.load(proj)
+                    result["projects"].append({
+                        "name": proj,
+                        "keywords": metadata.keywords,
+                        "description": metadata.description,
+                        "last_indexed": metadata.last_indexed,
+                        "is_current": proj == current
+                    })
+                return result
             
             elif action == "create":
                 if not project:
                     return {"error": "project name required"}
                 pm.create_project(project)
-                return {"success": f"Created project: {project}"}
+                return {
+                    "success": f"Created project: {project}",
+                    "next_step": f"Add keywords: manage_project(action='update', project='{project}', keywords=['term1', 'term2'])"
+                }
             
             elif action == "switch":
                 if not project:
@@ -55,20 +85,40 @@ def register_admin_tools(mcp):
                 get_index_manager().switch_project(project)
                 return {"success": f"Switched to: {project}"}
             
-            elif action == "set_metadata":
+            elif action == "update":
                 if not project:
                     return {"error": "project name required"}
+                if not keywords and not description:
+                    return {"error": "Provide keywords and/or description"}
+                
                 pm.set_project_metadata(project, keywords or [], description)
-                return {"success": f"Updated metadata for: {project}"}
+                return {
+                    "success": f"Updated metadata for: {project}",
+                    "keywords": keywords,
+                    "description": description,
+                    "tip": "Good keywords improve auto-routing accuracy"
+                }
             
-            elif action == "choose":
+            elif action == "analyze":
                 if not description:
-                    return {"error": "description/question required for choosing"}
-                result = pm.choose_project(description)
-                return result
+                    return {"error": "Provide a query in 'description' field to analyze routing"}
+                
+                result = pm.choose_project(description, max_candidates=3)
+                if "error" in result:
+                    return result
+                
+                return {
+                    "query": description,
+                    "recommendation": result.get("recommendation"),
+                    "all_candidates": result.get("candidates", []),
+                    "tip": "Top candidate will be auto-selected if you don't specify project in query_rag"
+                }
             
             else:
-                return {"error": f"Unknown action: {action}. Use: list, create, switch, set_metadata, choose"}
+                return {
+                    "error": f"Unknown action: {action}",
+                    "valid_actions": ["list", "create", "switch", "update", "analyze"]
+                }
                 
         except Exception as e:
             logger.error(f"Project management error: {e}", exc_info=True)
