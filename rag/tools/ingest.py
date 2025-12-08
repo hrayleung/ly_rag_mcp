@@ -89,8 +89,7 @@ def register_ingest_tools(mcp):
             all_nodes = []
             
             for doc in documents:
-                file_path = doc.metadata.get("file_path", "")
-                nodes = chunker.chunk_document(doc, file_path)
+                nodes = chunker.chunk_document(doc)
                 all_nodes.extend(nodes)
             
             # Insert
