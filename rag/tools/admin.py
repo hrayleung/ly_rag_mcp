@@ -55,20 +55,15 @@ def register_admin_tools(mcp):
             pm = get_project_manager()
             
             if action == "list":
-                projects = pm.list_projects()
+                project_info = pm.list_projects()
                 current = get_index_manager().current_project
                 
-                result = {"projects": [], "current": current}
-                for proj in projects:
-                    metadata = pm._metadata.load(proj)
-                    result["projects"].append({
-                        "name": proj,
-                        "keywords": metadata.keywords,
-                        "description": metadata.description,
-                        "last_indexed": metadata.last_indexed,
-                        "is_current": proj == current
-                    })
-                return result
+                # Use the details from list_projects
+                return {
+                    "projects": project_info.get("details", []),
+                    "current": current,
+                    "total": project_info.get("count", 0)
+                }
             
             elif action == "create":
                 if not project:
