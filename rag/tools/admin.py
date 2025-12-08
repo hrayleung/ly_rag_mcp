@@ -201,8 +201,11 @@ def register_admin_tools(mcp):
         
         try:
             target = project or get_index_manager().current_project
-            get_chroma_manager().clear_collection(target)
-            get_index_manager().reset()
-            return {"success": f"Cleared index for: {target}"}
+            success = get_chroma_manager().delete_collection(target)
+            if success:
+                get_index_manager().reset()
+                return {"success": f"Cleared index for: {target}"}
+            else:
+                return {"error": f"Failed to clear index for: {target}"}
         except Exception as e:
             return {"error": str(e)}

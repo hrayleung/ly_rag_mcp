@@ -77,9 +77,8 @@ def register_ingest_tools(mcp):
             
             # Load documents
             logger.info(f"Loading documents from {path} (mode: {mode})")
-            documents = loader.load_directory(
-                str(dir_path),
-                is_code=(mode in ["code", "hybrid"])
+            documents, skip_stats = loader.load_directory(
+                directory=dir_path
             )
             
             if not documents:
