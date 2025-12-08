@@ -150,7 +150,8 @@ class RAGSettings:
     storage_path: Path = field(init=False)
     
     # Embedding
-    embedding_model: str = "text-embedding-3-large"
+    embedding_provider: str = field(default_factory=lambda: os.getenv("EMBEDDING_PROVIDER", "openai"))
+    embedding_model: str = field(default_factory=lambda: os.getenv("EMBEDDING_MODEL", "text-embedding-3-large"))
     
     # Chunking
     chunk_size: int = 1024
@@ -223,3 +224,8 @@ def get_github_token() -> str | None:
 def get_firecrawl_key() -> str | None:
     """Get Firecrawl API key (optional)."""
     return os.getenv("FIRECRAWL_API_KEY")
+
+
+def get_gemini_key() -> str | None:
+    """Get Gemini API key (optional)."""
+    return os.getenv("GEMINI_API_KEY")

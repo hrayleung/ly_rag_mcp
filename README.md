@@ -1,12 +1,13 @@
 # LlamaIndex RAG MCP Server
 
-Local RAG system with OpenAI embeddings, Cohere reranking, and MCP server integration.
+Local RAG system with OpenAI/Gemini embeddings, Cohere reranking, and MCP server integration.
 
 ## Features
 
 - **Incremental Updates**: Only processes new/modified files, saves 95%+ API tokens
 - **Two-Stage Retrieval**: Vector search + semantic reranking
-- **Models**: OpenAI `text-embedding-3-large` + Cohere `rerank-v3.5`
+- **Multiple Embedding Providers**: OpenAI or Google Gemini
+- **Models**: OpenAI `text-embedding-3-large` or Gemini `text-embedding-004` + Cohere `rerank-v3.5`
 - **MCP Integration**: Works with Claude Code, Chatwise, Cherry Studio
 - **20+ File Formats**: PDF, DOCX, PPTX, MD, IPYNB, CSV, JSON, and more
 - **Local Storage**: ChromaDB vector database
@@ -25,6 +26,9 @@ conda activate rag-env
 pip install llama-index llama-index-embeddings-openai llama-index-vector-stores-chroma
 pip install llama-index-postprocessor-cohere-rerank chromadb fastmcp
 
+# Gemini support (optional)
+pip install google-genai
+
 # New features (Hybrid Search & Web Crawling)
 pip install rank-bm25 llama-index-retrievers-bm25 firecrawl-py
 ```
@@ -33,8 +37,20 @@ pip install rank-bm25 llama-index-retrievers-bm25 firecrawl-py
 
 ### 1. Set API Keys
 
+**Option A: OpenAI Embeddings (default)**
 ```bash
+export EMBEDDING_PROVIDER=openai
+export EMBEDDING_MODEL=text-embedding-3-large
 export OPENAI_API_KEY='your-openai-api-key'
+export COHERE_API_KEY='your-cohere-api-key'     # Optional: For Reranking
+export FIRECRAWL_API_KEY='your-firecrawl-key'   # Optional: For Web Crawling
+```
+
+**Option B: Gemini Embeddings**
+```bash
+export EMBEDDING_PROVIDER=gemini
+export EMBEDDING_MODEL=text-embedding-004
+export GEMINI_API_KEY='your-gemini-api-key'
 export COHERE_API_KEY='your-cohere-api-key'     # Optional: For Reranking
 export FIRECRAWL_API_KEY='your-firecrawl-key'   # Optional: For Web Crawling
 ```
@@ -53,6 +69,7 @@ python build_index.py /path/to/your/documents --rebuild
 
 Add to your MCP client configuration:
 
+**Option A: OpenAI Embeddings**
 ```json
 {
   "mcpServers": {
@@ -61,7 +78,29 @@ Add to your MCP client configuration:
       "args": ["/path/to/ly_rag_mcp/mcp_server.py"],
       "cwd": "/path/to/ly_rag_mcp",
       "env": {
+        "EMBEDDING_PROVIDER": "openai",
+        "EMBEDDING_MODEL": "text-embedding-3-large",
         "OPENAI_API_KEY": "your-openai-key",
+        "COHERE_API_KEY": "your-cohere-key",
+        "FIRECRAWL_API_KEY": "your-firecrawl-key"
+      }
+    }
+  }
+}
+```
+
+**Option B: Gemini Embeddings**
+```json
+{
+  "mcpServers": {
+    "llamaindex-rag": {
+      "command": "/path/to/conda/envs/rag-env/bin/python",
+      "args": ["/path/to/ly_rag_mcp/mcp_server.py"],
+      "cwd": "/path/to/ly_rag_mcp",
+      "env": {
+        "EMBEDDING_PROVIDER": "gemini",
+        "EMBEDDING_MODEL": "text-embedding-004",
+        "GEMINI_API_KEY": "your-gemini-key",
         "COHERE_API_KEY": "your-cohere-key",
         "FIRECRAWL_API_KEY": "your-firecrawl-key"
       }
@@ -216,15 +255,25 @@ The system dynamically adjusts candidate retrieval based on your `similarity_top
 
 ### Embedding Models
 
-Edit `build_index.py` and `mcp_server.py`:
+Set via environment variables in your MCP config:
 
-```python
-# Current
-Settings.embed_model = OpenAIEmbedding(model="text-embedding-3-large")  # 3072 dims
-
-# Alternative
-Settings.embed_model = OpenAIEmbedding(model="text-embedding-3-small")  # 1536 dims
+**OpenAI Models:**
+```json
+"env": {
+  "EMBEDDING_PROVIDER": "openai",
+  "EMBEDDING_MODEL": "text-embedding-3-large"  // or "text-embedding-3-small"
+}
 ```
+
+**Gemini Models:**
+```json
+"env": {
+  "EMBEDDING_PROVIDER": "gemini",
+  "EMBEDDING_MODEL": "text-embedding-004"  // or "embedding-001"
+}
+```
+
+**Note:** Indexes created with one embedding model are not compatible with another. If you switch models, rebuild your index with `--rebuild`.
 
 ### Reranking Models
 

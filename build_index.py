@@ -25,15 +25,15 @@ from llama_index.core import (
     Document,
 )
 from llama_index.core.node_parser import SentenceSplitter
-from llama_index.embeddings.openai import OpenAIEmbedding
 import chromadb
 from llama_index.vector_stores.chroma import ChromaVectorStore
 
 # Import from new package structure
 from rag.config import (
-    settings, logger, require_openai_key,
+    settings, logger,
     ALLOWED_EXTENSIONS, SUPPORTED_CODE_EXTS, SUPPORTED_DOC_EXTS
 )
+from rag.embeddings import get_embedding_model
 from rag.ingestion.processor import DocumentProcessor
 from rag.ingestion.chunker import get_splitter_for_file
 
@@ -95,11 +95,8 @@ def build_index(data_dir: str = "./data", rebuild: bool = False):
         data_dir: Path to directory containing documents to index
         rebuild: If True, rebuild entire index from scratch
     """
-    # Check for OpenAI API key
-    require_openai_key()
-
     # Configure LlamaIndex settings
-    Settings.embed_model = OpenAIEmbedding(model=settings.embedding_model)
+    Settings.embed_model = get_embedding_model()
     Settings.text_splitter = SentenceSplitter(
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,

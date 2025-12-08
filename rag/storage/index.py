@@ -14,10 +14,10 @@ from llama_index.core import (
     Settings as LlamaSettings,
 )
 from llama_index.core.node_parser import SentenceSplitter
-from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.vector_stores.chroma import ChromaVectorStore
 
-from rag.config import settings, logger, require_openai_key
+from rag.config import settings, logger
+from rag.embeddings import get_embedding_model
 from rag.models import CacheStats
 from rag.storage.chroma import get_chroma_manager
 
@@ -49,12 +49,8 @@ class IndexManager:
         """Configure LlamaIndex global settings."""
         if self._initialized:
             return
-            
-        require_openai_key()
         
-        LlamaSettings.embed_model = OpenAIEmbedding(
-            model=settings.embedding_model
-        )
+        LlamaSettings.embed_model = get_embedding_model()
         LlamaSettings.text_splitter = SentenceSplitter(
             chunk_size=settings.chunk_size,
             chunk_overlap=settings.chunk_overlap

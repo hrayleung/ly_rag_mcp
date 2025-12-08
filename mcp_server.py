@@ -54,6 +54,7 @@ def get_index_stats():
         "document_count": get_chroma_manager().get_collection_count(),
         "current_project": get_index_manager().current_project,
         "storage_location": str(settings.storage_path),
+        "embedding_provider": settings.embedding_provider,
         "embedding_model": settings.embedding_model
     }
 
