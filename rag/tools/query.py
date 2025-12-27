@@ -4,31 +4,60 @@ Query and retrieval MCP tools.
 
 from functools import wraps
 import time
+from time import perf_counter
 
 from rag.config import settings, logger
 from rag.retrieval.search import get_search_engine
 from rag.project.manager import get_project_manager
+from rag.project.metadata import get_metadata_manager
+
+# Minimum score threshold to consider results relevant
+RELEVANCE_THRESHOLD = 0.5
 
 
 def log_performance(func):
     """Decorator to log function performance."""
     @wraps(func)
     def wrapper(*args, **kwargs):
-        start = time.time()
+        start = perf_counter()
         name = func.__name__
         logger.info(f"Starting {name}")
-        
+
         try:
             result = func(*args, **kwargs)
-            elapsed = time.time() - start
+            elapsed = perf_counter() - start
             logger.info(f"Completed {name} in {elapsed:.3f}s")
             return result
         except Exception as e:
-            elapsed = time.time() - start
+            elapsed = perf_counter() - start
             logger.error(f"Failed {name} after {elapsed:.3f}s: {e}")
             raise
-    
+
     return wrapper
+
+
+def _search_project(engine, question: str, project: str, **kwargs):
+    """Execute search on a specific project and return results with relevance check."""
+    result = engine.search(
+        question=question,
+        project=project,
+        **kwargs
+    )
+    
+    # Check if results are relevant (score above threshold)
+    is_relevant = False
+    if result.results:
+        scores = []
+        for r in result.results:
+            try:
+                if r.score is not None:
+                    scores.append(float(r.score))
+            except Exception:
+                continue
+        top_score = max(scores) if scores else 0.0
+        is_relevant = top_score >= RELEVANCE_THRESHOLD
+
+    return result, is_relevant
 
 
 def register_query_tools(mcp):
@@ -58,87 +87,131 @@ def register_query_tools(mcp):
             project: Specific project to search (optional, auto-routes if not specified)
         
         Note: If project is not specified, the system automatically selects the best project
-        based on your question and project metadata (keywords, descriptions).
+        based on your question and project metadata. If results are not relevant, it will
+        try other projects. Successful queries update project keywords for better future routing.
         """
         try:
-            # Auto-route to best project if not specified
-            selected_project = project
-            routing_info = ""
-            
-            if not project:
-                pm = get_project_manager()
-                projects = pm.discover_projects()
-                
-                if len(projects) > 1:
-                    # Multiple projects - use smart routing
-                    routing = pm.choose_project(question, max_candidates=1)
-                    if not routing.get("error") and routing.get("recommendation"):
-                        rec = routing["recommendation"]
-                        # Handle both dict and string formats
-                        if isinstance(rec, dict):
-                            selected_project = rec.get("project")
-                            score = rec.get("score", 0)
-                        else:
-                            selected_project = rec
-                            score = 0
-                        
-                        if selected_project:
-                            routing_info = f" [auto-routed to '{selected_project}' (confidence: {score:.1f})]"
-                            logger.info(f"Auto-routed query to project: {selected_project} (score: {score})")
-                elif len(projects) == 1:
-                    selected_project = projects[0]
-                    routing_info = f" [project: {selected_project}]"
-            else:
-                routing_info = f" [project: {project}]"
-            
-            # Execute search
+            pm = get_project_manager()
+            mm = get_metadata_manager()
             engine = get_search_engine()
-            result = engine.search(
-                question=question,
-                similarity_top_k=similarity_top_k,
-                search_mode=search_mode,
-                use_rerank=use_rerank,
-                use_hyde=use_hyde,
-                project=selected_project
-            )
             
-            if not result.results:
-                msg = f"No relevant documents found{routing_info}"
-                return {"error": msg, "project": selected_project} if return_metadata else msg
+            search_kwargs = {
+                "similarity_top_k": similarity_top_k,
+                "search_mode": search_mode,
+                "use_rerank": use_rerank,
+                "use_hyde": use_hyde
+            }
             
-            # Return structured data
-            if return_metadata:
-                return {
-                    "sources": [
-                        {
-                            "text": r.text,
-                            "score": r.score,
-                            "metadata": r.metadata,
-                        }
-                        for r in result.results
-                    ],
-                    "total": result.total,
-                    "search_mode": result.search_mode.value,
-                    "reranked": result.reranked,
-                    "used_hyde": result.used_hyde,
-                    "project": selected_project,
-                    "auto_routed": not project
-                }
+            # If project specified, search only that project
+            if project:
+                result, is_relevant = _search_project(engine, question, project, **search_kwargs)
+                if is_relevant:
+                    mm.learn_from_query(project, question, success=True)
+                return _format_result(result, project, False, return_metadata)
             
-            # Return formatted text
-            mode_info = f" ({result.search_mode.value}"
-            if result.used_hyde:
-                mode_info += " + HyDE"
-            if result.reranked:
-                mode_info += " + reranked"
-            mode_info += ")"
+            # Auto-routing: get ranked project candidates
+            projects = pm.discover_projects()
+            if not projects:
+                msg = "No projects available"
+                return {"error": msg} if return_metadata else msg
             
-            output = f"Found {result.total} documents{mode_info}{routing_info}:\n\n"
-            for i, doc in enumerate(result.results, 1):
-                output += f"--- Document {i} (score: {doc.score:.3f}) ---\n{doc.text}\n\n"
+            if len(projects) == 1:
+                # Only one project, use it directly
+                result, is_relevant = _search_project(engine, question, projects[0], **search_kwargs)
+                if is_relevant:
+                    mm.learn_from_query(projects[0], question, success=True)
+                return _format_result(result, projects[0], False, return_metadata)
             
-            return output
+            # Multiple projects - use smart routing with fallback
+            routing = pm.choose_project(question, max_candidates=len(projects))
+            candidates = routing.get("candidates", [])
+            
+            if not candidates:
+                msg = "No matching projects found"
+                return {"error": msg} if return_metadata else msg
+            
+            # Try projects in order of relevance score
+            tried_projects = []
+            for candidate in candidates:
+                proj_name = candidate["project"]
+                tried_projects.append(proj_name)
+                
+                result, is_relevant = _search_project(engine, question, proj_name, **search_kwargs)
+                
+                if is_relevant:
+                    # Found relevant results - learn and return
+                    mm.learn_from_query(proj_name, question, success=True)
+                    logger.info(f"Found relevant results in project: {proj_name}")
+                    return _format_result(result, proj_name, True, return_metadata, tried_projects)
+                
+                logger.info(f"Results from {proj_name} not relevant (score < {RELEVANCE_THRESHOLD}), trying next...")
+            
+            # No relevant results in any project - return best attempt
+            best_project = candidates[0]["project"]
+            result, _ = _search_project(engine, question, best_project, **search_kwargs)
+            return _format_result(result, best_project, True, return_metadata, tried_projects, 
+                                  note="No highly relevant results found in any project")
             
         except Exception as e:
             logger.error(f"Query error: {e}", exc_info=True)
             return {"error": str(e)} if return_metadata else f"Error: {str(e)}"
+
+
+def _format_result(result, project: str, auto_routed: bool, return_metadata: bool, 
+                   tried_projects: list = None, note: str = None) -> str | dict:
+    """Format search results for output."""
+    if not result.results:
+        msg = f"No relevant documents found [project: {project}]"
+        return {"error": msg, "project": project} if return_metadata else msg
+    
+    if return_metadata:
+        output = {
+            "sources": [
+                {
+                    "text": r.text,
+                    "score": (float(r.score) if r.score is not None else None),
+                    "metadata": r.metadata,
+                }
+                for r in result.results
+            ],
+            "total": result.total,
+            "search_mode": result.search_mode.value,
+            "reranked": result.reranked,
+            "used_hyde": result.used_hyde,
+            "project": project,
+            "auto_routed": auto_routed,
+        }
+        if tried_projects:
+            output["tried_projects"] = tried_projects
+        if note:
+            output["note"] = note
+        return output
+    
+    # Format as text
+    routing_info = f" [project: {project}]"
+    if tried_projects and len(tried_projects) > 1:
+        routing_info = f" [tried: {' → '.join(tried_projects)}]"
+    
+    mode_info = f" ({result.search_mode.value}"
+    if result.used_hyde:
+        mode_info += " + HyDE"
+    if result.reranked:
+        mode_info += " + reranked"
+    mode_info += ")"
+    
+    output = f"Found {result.total} documents{mode_info}{routing_info}:\n"
+    if note:
+        output += f"Note: {note}\n"
+    output += "\n"
+    
+    for i, doc in enumerate(result.results, 1):
+        if doc.score is None:
+            score_str = "n/a"
+        else:
+            try:
+                score_str = f"{float(doc.score):.3f}"
+            except Exception:
+                score_str = "n/a"
+        output += f"--- Document {i} (score: {score_str}) ---\n{doc.text}\n\n"
+
+    return output

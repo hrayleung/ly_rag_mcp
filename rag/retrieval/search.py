@@ -3,6 +3,7 @@ Unified search engine combining different retrieval strategies.
 """
 
 import re
+import time
 from typing import List, Optional, Tuple
 
 from llama_index.core.retrievers import QueryFusionRetriever
@@ -42,7 +43,7 @@ class SearchEngine:
     ) -> SearchResult:
         """
         Execute a search query.
-        
+
         Args:
             question: Query string
             similarity_top_k: Number of results to return
@@ -50,23 +51,30 @@ class SearchEngine:
             use_rerank: Enable Cohere reranking
             use_hyde: Enable HyDE for ambiguous queries
             project: Target project
-            
+
         Returns:
             SearchResult containing retrieved documents
         """
         # Validate inputs
         question = self._validate_query(question)
         top_k = self._validate_top_k(similarity_top_k)
-        
+
         # Determine effective search mode
         requested_mode = SearchMode(search_mode.lower())
         effective_mode = self._select_search_mode(question, requested_mode)
-        
+
         # Get index
+        index_start = time.perf_counter()
         index = self._index_manager.get_index(project)
+        index_elapsed = time.perf_counter() - index_start
         current_project = self._index_manager.current_project
-        
+        logger.info(
+            "search:get_index timing",
+            extra={"project": current_project, "elapsed_ms": round(index_elapsed * 1000, 2)},
+        )
+
         # Execute retrieval
+        retrieve_start = time.perf_counter()
         nodes, search_query, rerank_used = self._retrieve(
             index=index,
             question=question,
@@ -76,7 +84,19 @@ class SearchEngine:
             use_hyde=use_hyde,
             project=current_project
         )
-        
+        retrieve_elapsed = time.perf_counter() - retrieve_start
+        logger.info(
+            "search:retrieve timing",
+            extra={
+                "project": current_project,
+                "elapsed_ms": round(retrieve_elapsed * 1000, 2),
+                "mode": effective_mode.value,
+                "top_k": top_k,
+                "rerank": rerank_used,
+                "hyde": use_hyde,
+            },
+        )
+
         # Convert to results
         results = [
             RetrievalResult(
@@ -87,7 +107,7 @@ class SearchEngine:
             )
             for node in nodes
         ]
-        
+
         return SearchResult(
             results=results,
             query=question,

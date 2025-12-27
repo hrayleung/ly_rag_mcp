@@ -16,6 +16,12 @@ from rag.ingestion.loader import DocumentLoader
 from rag.ingestion.processor import DocumentProcessor
 from rag.ingestion.chunker import DocumentChunker
 
+try:
+    from firecrawl import Firecrawl
+    FIRECRAWL_AVAILABLE = True
+except ImportError:
+    FIRECRAWL_AVAILABLE = False
+
 
 def register_ingest_tools(mcp):
     """Register ingestion MCP tools."""
@@ -27,20 +33,18 @@ def register_ingest_tools(mcp):
     @mcp.tool()
     def index_documents(
         path: str,
-        project: str = None,
-        mode: str = "auto"
+        project: str = None
     ) -> dict:
         """
         Index documents or code from a directory.
-        
+
         Args:
             path: Directory path to index
             project: Project/workspace name (creates if doesn't exist)
-            mode: 'auto' (detect), 'code' (codebase), 'docs' (documents), or 'hybrid' (mixed)
-        
+
         Examples:
             index_documents(path='/path/to/docs', project='my-docs')
-            index_documents(path='/path/to/repo', project='backend', mode='code')
+            index_documents(path='/path/to/repo', project='backend')
         """
         try:
             dir_path = Path(path)
@@ -49,34 +53,52 @@ def register_ingest_tools(mcp):
             if not dir_path.is_dir():
                 return {"error": f"Not a directory: {path}"}
             
-            # Resolve project
             pm = get_project_manager()
+            existing_projects = pm.discover_projects()
             suggested_name = dir_path.name
             
+            # Always require explicit project selection
             if not project:
+                # Extract preview keywords to help user decide
+                preview_keywords = get_metadata_manager().extract_keywords_from_directory(dir_path, max_keywords=8)
+                
                 return {
-                    "project_confirmation_required": True,
-                    "suggested_project": suggested_name,
-                    "message": f"Specify project name or use suggested: '{suggested_name}'"
+                    "action_required": "select_project",
+                    "message": "Please specify which project to index into, or create a new one.",
+                    "path": str(dir_path),
+                    "suggested_new_project": suggested_name,
+                    "detected_keywords": preview_keywords,
+                    "existing_projects": existing_projects,
+                    "options": [
+                        f"Create new project: index_documents(path='{path}', project='{suggested_name}')",
+                        "Use existing project: index_documents(path='...', project='<existing_name>')"
+                    ]
                 }
             
-            if project not in pm.list_projects():
-                pm.create_project(project)
+            # Create new project if needed
+            if project not in existing_projects:
+                create_result = pm.create_project(project)
+                if create_result.get("error"):
+                    return create_result
                 logger.info(f"Created new project: {project}")
-            
+                # Auto-generate initial keywords from directory
+                keywords = get_metadata_manager().extract_keywords_from_directory(dir_path)
+                if keywords:
+                    pm.set_project_metadata(project, keywords=keywords)
+                    logger.info(f"Auto-generated keywords for {project}: {keywords}")
+
             get_index_manager().switch_project(project)
-            
-            # Detect mode
-            if mode == "auto":
-                has_code_markers = any(
-                    (dir_path / f).exists() for f in CODE_INDICATOR_FILES
-                ) or any(
-                    (dir_path / d).exists() for d in CODE_INDICATOR_DIRS
-                )
-                mode = "hybrid" if has_code_markers else "docs"
+
+            # Detect mode (removed; always infer based on content during processing)
+            has_code_markers = any(
+                (dir_path / f).exists() for f in CODE_INDICATOR_FILES
+            ) or any(
+                (dir_path / d).exists() for d in CODE_INDICATOR_DIRS
+            )
+            detected_mode = "hybrid" if has_code_markers else "docs"
             
             # Load documents
-            logger.info(f"Loading documents from {path} (mode: {mode})")
+            logger.info(f"Loading documents from {path} (mode: {detected_mode})")
             documents, skip_stats = loader.load_directory(
                 directory=dir_path
             )
@@ -84,7 +106,9 @@ def register_ingest_tools(mcp):
             if not documents:
                 return {"error": "No supported documents found"}
             
-            # Process and chunk
+            # Process: sanitize metadata and inject context
+            for doc in documents:
+                doc.metadata = processor.sanitize_metadata(doc.metadata)
             documents = [processor.inject_context(doc) for doc in documents]
             all_nodes = []
             
@@ -106,7 +130,7 @@ def register_ingest_tools(mcp):
                 "project": project,
                 "documents_processed": len(documents),
                 "chunks_created": len(all_nodes),
-                "mode": mode
+                "mode": detected_mode
             }
             
         except Exception as e:
@@ -171,7 +195,6 @@ def register_ingest_tools(mcp):
                 "total_size_mb": 0,
                 "has_git": (dir_path / ".git").exists(),
                 "suggested_name": dir_path.name,
-                "suggested_mode": "docs"
             }
             
             for file in dir_path.rglob("*"):
@@ -185,14 +208,75 @@ def register_ingest_tools(mcp):
                     elif ext in ['.md', '.txt', '.pdf', '.docx']:
                         stats["doc_files"] += 1
             
-            if stats["code_files"] > stats["doc_files"]:
-                stats["suggested_mode"] = "code"
-            elif stats["code_files"] > 0:
-                stats["suggested_mode"] = "hybrid"
-            
             stats["total_size_mb"] = round(stats["total_size_mb"], 2)
-            
+
             return stats
             
         except Exception as e:
+            return {"error": str(e)}
+
+    
+    @mcp.tool()
+    def crawl_website(url: str, max_pages: int = 10, project: str = None) -> dict:
+        """
+        Crawl and index a website using Firecrawl.
+        
+        Args:
+            url: Website URL to crawl
+            max_pages: Maximum pages to crawl (default: 10)
+            project: Target project (uses current if not specified)
+        """
+        if not FIRECRAWL_AVAILABLE:
+            return {"error": "Firecrawl not installed. Run: pip install firecrawl-py"}
+        
+        api_key = os.getenv("FIRECRAWL_API_KEY")
+        if not api_key:
+            return {"error": "FIRECRAWL_API_KEY not set"}
+        
+        try:
+            from firecrawl import Firecrawl
+            from firecrawl.types import ScrapeOptions
+            
+            app = Firecrawl(api_key=api_key)
+            result = app.crawl(
+                url, 
+                limit=max_pages,
+                scrape_options=ScrapeOptions(formats=['markdown'])
+            )
+            
+            if not result or not result.data:
+                return {"error": "No content crawled"}
+            
+            documents = []
+            for page in result.data:
+                doc = Document(
+                    text=page.markdown if hasattr(page, 'markdown') else str(page),
+                    metadata={
+                        'url': page.url if hasattr(page, 'url') else url,
+                        'title': getattr(page.metadata, 'title', '') if hasattr(page, 'metadata') else '',
+                        'source': 'firecrawl',
+                        'crawled_at': datetime.now().isoformat()
+                    }
+                )
+                documents.append(processor.inject_context(doc))
+            
+            all_nodes = []
+            for doc in documents:
+                all_nodes.extend(chunker.chunk_document(doc))
+            
+            index_manager = get_index_manager()
+            index_manager.insert_nodes(all_nodes, project, show_progress=True)
+            index_manager.persist(project)
+            
+            target_project = project or index_manager.current_project
+            get_metadata_manager().record_index_activity(target_project, url)
+            
+            return {
+                "success": True,
+                "pages_crawled": len(documents),
+                "chunks_created": len(all_nodes),
+                "url": url
+            }
+        except Exception as e:
+            logger.error(f"Crawl error: {e}", exc_info=True)
             return {"error": str(e)}
