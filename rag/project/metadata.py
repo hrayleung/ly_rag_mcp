@@ -192,7 +192,11 @@ class MetadataManager:
         if initialize and not metadata.description:
             metadata.description = ""
 
-        with _file_lock(meta_path):
+        try:
+            with _file_lock(meta_path):
+                _atomic_write_json(meta_path, metadata.to_dict())
+        except Exception as e:
+            logger.warning(f"Skipping lock for {meta_path}: {e}")
             _atomic_write_json(meta_path, metadata.to_dict())
 
         self._cache[project] = metadata
@@ -298,7 +302,11 @@ class MetadataManager:
 
         manifest["updated_at"] = datetime.now().isoformat()
 
-        with _file_lock(manifest_path):
+        try:
+            with _file_lock(manifest_path):
+                _atomic_write_json(manifest_path, manifest)
+        except Exception as e:
+            logger.warning(f"Skipping lock for {manifest_path}: {e}")
             _atomic_write_json(manifest_path, manifest)
 
     def clear_cache(self, project: Optional[str] = None) -> None:
