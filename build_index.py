@@ -11,6 +11,7 @@ Usage:
 """
 
 import sys
+import os
 import json
 import argparse
 from pathlib import Path
@@ -58,6 +59,8 @@ def save_tracking_data(tracking_data):
     Path(TRACKING_FILE).parent.mkdir(parents=True, exist_ok=True)
     with open(TRACKING_FILE, 'w') as f:
         json.dump(tracking_data, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def get_file_metadata(file_path):

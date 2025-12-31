@@ -75,7 +75,7 @@ def query_rag(question: str, similarity_top_k: int = 6, **kwargs) -> str:
     output = f"Found {result.total} relevant document(s):\n\n"
     for i, doc in enumerate(result.results, 1):
         output += f"--- Document {i} ---\n{doc.text}\n"
-        if doc.score:
+        if doc.score is not None:
             output += f"Score: {doc.score:.3f}\n"
         output += "\n"
     

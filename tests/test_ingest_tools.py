@@ -22,55 +22,38 @@ class DummyMCP:
 
 
 def _setup_index_docs_tool(tmp_path, pm=None, mm=None, im=None, loader=None, processor=None, chunker=None):
-    """Register tool and inject fakes via closures and patches."""
+    """Register tool and inject fakes via class patches (instances now created inside functions)."""
     mcp = DummyMCP()
     register_ingest_tools(mcp)
     tool = mcp.tools["index_documents"]
 
-    # Grab closure instances for loader/processor/chunker
-    closure_cells = {id(c.cell_contents): c.cell_contents for c in tool.__closure__ or []}
-    closure_objs = list(closure_cells.values())
+    # Create default fakes if not provided
+    fake_loader = loader if loader else MagicMock()
+    if not loader:
+        fake_loader.load_directory = MagicMock(return_value=([], {}))
+    fake_processor = processor if processor else MagicMock()
+    if not processor:
+        fake_processor.sanitize_metadata = MagicMock(side_effect=lambda m: m)
+        fake_processor.inject_context = MagicMock(side_effect=lambda d: d)
+    fake_chunker = chunker if chunker else MagicMock()
+    if not chunker:
+        fake_chunker.chunk_document = MagicMock(return_value=[])
 
-    def pick(attr):
-        for obj in closure_objs:
-            if hasattr(obj, attr):
-                return obj
-        return None
-
-    real_loader = pick("load_directory")
-    real_processor = pick("sanitize_metadata")
-    real_chunker = pick("chunk_document")
-
-    # Override behaviors on captured instances if provided
-    if loader and real_loader:
-        real_loader.load_directory = loader.load_directory
-    if processor and real_processor:
-        real_processor.sanitize_metadata = processor.sanitize_metadata
-        real_processor.inject_context = processor.inject_context
-    if chunker and real_chunker:
-        real_chunker.chunk_document = chunker.chunk_document
-    # If overrides missing, ensure defaults are harmless no-ops for tests
-    if real_loader and not loader:
-        real_loader.load_directory = MagicMock(return_value=([], {}))
-    if real_processor and not processor:
-        real_processor.sanitize_metadata = MagicMock(side_effect=lambda m: m)
-        real_processor.inject_context = MagicMock(side_effect=lambda d: d)
-    if real_chunker and not chunker:
-        real_chunker.chunk_document = MagicMock(return_value=[])
+    # Default manager mocks if not provided
+    fake_pm = pm if pm else MagicMock()
+    if not isinstance(fake_pm.discover_projects.return_value, list):
+        fake_pm.discover_projects.return_value = []
+    fake_mm = mm if mm else MagicMock()
+    fake_im = im if im else MagicMock()
+    fake_im.insert_nodes.return_value = 0
 
     def wrapped(*args, **kwargs):
-        # Default mocks if not provided
-        pm_local = pm or MagicMock()
-        existing = pm_local.discover_projects.return_value
-        if not isinstance(existing, list):
-            pm_local.discover_projects.return_value = []
-        mm_local = mm or MagicMock()
-        im_local = im or MagicMock()
-        im_local.insert_nodes.return_value = 0
-
-        with patch("rag.tools.ingest.get_project_manager", return_value=pm_local), \
-            patch("rag.tools.ingest.get_metadata_manager", return_value=mm_local), \
-            patch("rag.tools.ingest.get_index_manager", return_value=im_local):
+        with patch("rag.tools.ingest.DocumentLoader", return_value=fake_loader), \
+             patch("rag.tools.ingest.DocumentProcessor", return_value=fake_processor), \
+             patch("rag.tools.ingest.DocumentChunker", return_value=fake_chunker), \
+             patch("rag.tools.ingest.get_project_manager", return_value=fake_pm), \
+             patch("rag.tools.ingest.get_metadata_manager", return_value=fake_mm), \
+             patch("rag.tools.ingest.get_index_manager", return_value=fake_im):
             return tool(*args, **kwargs)
 
     return wrapped

@@ -44,16 +44,18 @@ def check_rag_package():
         from rag.models import SearchMode, ProjectMetadata
         print("  [OK] rag.models")
 
-        from rag.storage import ChromaManager, IndexManager
+        from rag.storage.chroma import ChromaManager
+        from rag.storage.index import IndexManager
         print("  [OK] rag.storage")
 
-        from rag.retrieval import SearchEngine
+        from rag.retrieval.search import SearchEngine
         print("  [OK] rag.retrieval")
 
-        from rag.ingestion import DocumentLoader, DocumentProcessor
+        from rag.ingestion.loader import DocumentLoader
+        from rag.ingestion.processor import DocumentProcessor
         print("  [OK] rag.ingestion")
 
-        from rag.project import ProjectManager
+        from rag.project.manager import ProjectManager
         print("  [OK] rag.project")
 
         from rag.tools import register_all_tools

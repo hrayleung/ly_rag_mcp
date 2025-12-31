@@ -227,7 +227,9 @@ def test_edge_cases():
 
     try:
         from rag.retrieval.search import get_search_engine
-        from rag.tools.admin import get_index_stats
+        from rag.storage.chroma import get_chroma_manager
+        from rag.storage.index import get_index_manager
+        from rag.config import settings
 
         engine = get_search_engine()
         tests = []
@@ -267,8 +269,14 @@ def test_edge_cases():
         # Test 4: Stats retrieval
         print("\nTest 4: Index stats")
         try:
-            stats = get_index_stats()
-            tests.append(("Index stats", "PASS" if 'document_count' in stats else "FAIL"))
+            stats = {
+                "status": "ready",
+                "documents": get_chroma_manager().get_collection_count(),
+                "current_project": get_index_manager().current_project,
+                "embedding_provider": settings.embedding_provider,
+                "embedding_model": settings.embedding_model
+            }
+            tests.append(("Index stats", "PASS" if 'documents' in stats else "FAIL"))
             print(f"  [OK] Stats: {stats}")
         except Exception as e:
             tests.append(("Index stats", f"FAIL: {e}"))

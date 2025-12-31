@@ -19,8 +19,8 @@ Local RAG system with OpenAI/Gemini embeddings, Cohere reranking, and MCP server
 git clone https://github.com/hrayleung/ly_rag_mcp.git
 cd ly_rag_mcp
 
-conda create -n rag-env python=3.10
-conda activate rag-env
+conda create -n deep-learning python=3.10
+conda activate deep-learning
 
 # Core dependencies
 pip install llama-index llama-index-embeddings-openai llama-index-vector-stores-chroma
@@ -74,7 +74,7 @@ Add to your MCP client configuration:
 {
   "mcpServers": {
     "llamaindex-rag": {
-      "command": "/path/to/conda/envs/rag-env/bin/python",
+      "command": "/path/to/conda/envs/deep-learning/bin/python",
       "args": ["/path/to/ly_rag_mcp/mcp_server.py"],
       "cwd": "/path/to/ly_rag_mcp",
       "env": {
@@ -94,7 +94,7 @@ Add to your MCP client configuration:
 {
   "mcpServers": {
     "llamaindex-rag": {
-      "command": "/path/to/conda/envs/rag-env/bin/python",
+      "command": "/path/to/conda/envs/deep-learning/bin/python",
       "args": ["/path/to/ly_rag_mcp/mcp_server.py"],
       "cwd": "/path/to/ly_rag_mcp",
       "env": {
@@ -134,7 +134,7 @@ Show me the index statistics
 | Media | `.jpg`, `.jpeg`, `.png`, `.mp3`, `.mp4` |
 | Other | `.hwp`, `.mbox` |
 
-File size limit: 300MB per file
+File size limit: 100MB per file
 
 ## MCP Tools
 

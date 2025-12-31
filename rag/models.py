@@ -1,7 +1,7 @@
 """
-Data models for the RAG system.
+Data models for RAG system.
 
-Defines structured data types used throughout the application.
+Defines structured data types used throughout application.
 """
 
 from dataclasses import dataclass, field
@@ -37,7 +37,7 @@ class FileMetadata:
     path: str
     mtime_ns: int
     size: int = 0
-    
+
     @classmethod
     def from_path(cls, path) -> "FileMetadata":
         """Create FileMetadata from a Path object."""
@@ -62,14 +62,13 @@ class ProjectMetadata:
     last_indexed: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
-    
+
     def __post_init__(self):
-        if not self.display_name:
-            self.display_name = self.name
-        if not self.created_at:
+        # Only auto-set created_at if it's truly None, not just falsy
+        if self.created_at is None:
             self.created_at = datetime.now().isoformat()
         self.updated_at = datetime.now().isoformat()
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         return {
@@ -82,12 +81,15 @@ class ProjectMetadata:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ProjectMetadata":
         """Create from dictionary."""
+        name = data.get("name")
+        if not name:
+            raise ValueError("ProjectMetadata requires a non-empty 'name' field")
         return cls(
-            name=data.get("name", ""),
+            name=name,
             display_name=data.get("display_name", ""),
             description=data.get("description", ""),
             keywords=data.get("keywords", []),
@@ -105,13 +107,18 @@ class RetrievalResult:
     score: Optional[float] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     node_id: str = ""
-    
+
     @property
     def preview(self) -> str:
         """Get a preview of the text."""
-        if len(self.text) > 200:
-            return self.text[:200] + "..."
-        return self.text
+        if len(self.text) <= 200:
+            return self.text
+        # Try to break at a space for cleaner preview
+        truncated = self.text[:200]
+        last_space = truncated.rfind(' ')
+        if last_space > 150:
+            return truncated[:last_space] + "..."
+        return truncated + "..."
 
 
 @dataclass
@@ -124,7 +131,7 @@ class SearchResult:
     used_hyde: bool = False
     generated_query: Optional[str] = None
     project: str = ""
-    
+
     @property
     def total(self) -> int:
         return len(self.results)
@@ -141,7 +148,7 @@ class IngestResult:
     skipped_oversize: int = 0
     skipped_other: int = 0
     error: Optional[str] = None
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         result = {
@@ -161,7 +168,7 @@ class IngestResult:
         return result
 
 
-@dataclass 
+@dataclass
 class CacheStats:
     """Cache performance statistics."""
     index_loads: int = 0
@@ -172,9 +179,14 @@ class CacheStats:
     chroma_cache_hits: int = 0
     bm25_builds: int = 0
     bm25_cache_hits: int = 0
-    
+
+    VALID_CATEGORIES = {"index", "reranker", "chroma", "bm25"}
+
     def get_hit_rate(self, category: str) -> float:
         """Calculate hit rate for a category."""
+        if category not in self.VALID_CATEGORIES:
+            raise ValueError(f"Invalid category: {category}. Valid categories: {self.VALID_CATEGORIES}")
+
         if category == "index":
             total = self.index_loads + self.index_cache_hits
             return (self.index_cache_hits / total * 100) if total > 0 else 0
@@ -188,7 +200,36 @@ class CacheStats:
             total = self.bm25_builds + self.bm25_cache_hits
             return (self.bm25_cache_hits / total * 100) if total > 0 else 0
         return 0
-    
+
+    def reset(self, category: Optional[str] = None) -> None:
+        """Reset statistics for a category or all categories."""
+        if category:
+            if category not in self.VALID_CATEGORIES:
+                raise ValueError(f"Invalid category: {category}. Valid categories: {self.VALID_CATEGORIES}")
+
+            if category == "index":
+                self.index_loads = 0
+                self.index_cache_hits = 0
+            elif category == "reranker":
+                self.reranker_loads = 0
+                self.reranker_cache_hits = 0
+            elif category == "chroma":
+                self.chroma_loads = 0
+                self.chroma_cache_hits = 0
+            elif category == "bm25":
+                self.bm25_builds = 0
+                self.bm25_cache_hits = 0
+        else:
+            # Reset all
+            self.index_loads = 0
+            self.index_cache_hits = 0
+            self.reranker_loads = 0
+            self.reranker_cache_hits = 0
+            self.chroma_loads = 0
+            self.chroma_cache_hits = 0
+            self.bm25_builds = 0
+            self.bm25_cache_hits = 0
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary with hit rates."""
         return {

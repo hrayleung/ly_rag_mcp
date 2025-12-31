@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import threading
 from collections import deque
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
@@ -41,26 +42,26 @@ ROOT = Path(__file__).parent
 FRONTEND_DIST = ROOT / "frontend" / "dist"
 LOG = setup_logging()
 
-REQUEST_BUFFER_SIZE = 200
-LOG_BUFFER_SIZE = 400
-
 # ---------------------------------------------------------------------------
 # Telemetry buffers
 # ---------------------------------------------------------------------------
 class RingLogHandler(logging.Handler):
-    def __init__(self, maxlen: int = LOG_BUFFER_SIZE):
+    def __init__(self, maxlen: int = settings.log_buffer_size):
         super().__init__()
         self.buffer: Deque[str] = deque(maxlen=maxlen)
+        self._lock = threading.Lock()
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
             msg = self.format(record)
-            self.buffer.appendleft(msg)
+            with self._lock:
+                self.buffer.appendleft(msg)
         except Exception:  # pragma: no cover - safety net
             pass
 
     def dump(self) -> List[str]:
-        return list(self.buffer)
+        with self._lock:
+            return list(self.buffer)
 
 
 log_handler = RingLogHandler()
@@ -68,7 +69,8 @@ log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s
 logging.getLogger().addHandler(log_handler)
 # Preserve whichever level setup_logging configured; avoid redundant setLevel
 
-request_buffer: Deque[Dict[str, Any]] = deque(maxlen=REQUEST_BUFFER_SIZE)
+request_buffer_lock = threading.Lock()
+request_buffer: Deque[Dict[str, Any]] = deque(maxlen=settings.request_buffer_size)
 process_start = time.time()
 
 # Tool metadata (static list to avoid MCP context requirements)
@@ -117,13 +119,13 @@ async def record_requests(request: Request, call_next):
             "ts": time.time(),
             "code": status,
         }
-        request_buffer.appendleft(entry)
+        with request_buffer_lock:
+            request_buffer.appendleft(entry)
 
 
 # ---------------------------------------------------------------------------
 # API routes
 # ---------------------------------------------------------------------------
-from functools import lru_cache
 
 
 @lru_cache(maxsize=1)
@@ -138,7 +140,8 @@ async def list_tools():
 
 @app.get("/api/mcp/requests")
 async def list_requests():
-    return JSONResponse(list(request_buffer))
+    with request_buffer_lock:
+        return JSONResponse(list(request_buffer))
 
 
 @app.get("/api/mcp/logs")
@@ -156,7 +159,10 @@ async def stats():
     now = time.time()
     rpm = 0
     errors = 0
-    for r in request_buffer:
+    with request_buffer_lock:
+        buffer_copy = list(request_buffer)
+
+    for r in buffer_copy:
         if now - r.get("ts", now) <= 60:
             rpm += 1
             if r.get("code", 0) >= 400:

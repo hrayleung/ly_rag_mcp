@@ -61,8 +61,6 @@ class DocumentProcessor:
             
             if isinstance(value, _ALLOWED_METADATA_TYPES):
                 sanitized[safe_key] = value
-            elif isinstance(value, bool):
-                sanitized[safe_key] = str(value)
             elif isinstance(value, (list, tuple, set)):
                 sanitized[safe_key] = ", ".join(str(item) for item in value)
             elif isinstance(value, dict):

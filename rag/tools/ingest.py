@@ -25,11 +25,7 @@ except ImportError:
 
 def register_ingest_tools(mcp):
     """Register ingestion MCP tools."""
-    
-    loader = DocumentLoader()
-    processor = DocumentProcessor()
-    chunker = DocumentChunker()
-    
+
     @mcp.tool()
     def index_documents(
         path: str,
@@ -96,7 +92,12 @@ def register_ingest_tools(mcp):
                 (dir_path / d).exists() for d in CODE_INDICATOR_DIRS
             )
             detected_mode = "hybrid" if has_code_markers else "docs"
-            
+
+            # Create per-call instances for thread safety
+            loader = DocumentLoader()
+            processor = DocumentProcessor()
+            chunker = DocumentChunker()
+
             # Load documents
             logger.info(f"Loading documents from {path} (mode: {detected_mode})")
             documents, skip_stats = loader.load_directory(
@@ -141,7 +142,7 @@ def register_ingest_tools(mcp):
     def add_text(text: str, metadata: dict = None, project: str = None) -> dict:
         """
         Add raw text to index.
-        
+
         Args:
             text: Content to add
             metadata: Optional metadata dict
@@ -150,7 +151,9 @@ def register_ingest_tools(mcp):
         try:
             if not text or not text.strip():
                 return {"error": "Text cannot be empty"}
-            
+
+            # Create per-call processor instance for thread safety
+            processor = DocumentProcessor()
             doc_metadata = processor.sanitize_metadata(metadata or {})
             doc_metadata['added_via'] = 'mcp_tool'
             doc_metadata['added_at'] = datetime.now().isoformat()
@@ -220,7 +223,7 @@ def register_ingest_tools(mcp):
     def crawl_website(url: str, max_pages: int = 10, project: str = None) -> dict:
         """
         Crawl and index a website using Firecrawl.
-        
+
         Args:
             url: Website URL to crawl
             max_pages: Maximum pages to crawl (default: 10)
@@ -228,25 +231,34 @@ def register_ingest_tools(mcp):
         """
         if not FIRECRAWL_AVAILABLE:
             return {"error": "Firecrawl not installed. Run: pip install firecrawl-py"}
-        
+
         api_key = os.getenv("FIRECRAWL_API_KEY")
         if not api_key:
             return {"error": "FIRECRAWL_API_KEY not set"}
-        
+
+        if max_pages <= 0:
+            return {"error": "max_pages must be positive"}
+
         try:
             from firecrawl import Firecrawl
             from firecrawl.types import ScrapeOptions
-            
+
+            # Create per-call processor and chunker for thread safety
+            processor = DocumentProcessor()
+            chunker = DocumentChunker()
+
             app = Firecrawl(api_key=api_key)
             result = app.crawl(
-                url, 
+                url,
                 limit=max_pages,
-                scrape_options=ScrapeOptions(formats=['markdown'])
+                scrape_options=ScrapeOptions(formats=['markdown']),
+                timeout=30  # 30 second timeout
             )
-            
-            if not result or not result.data:
+
+            # Validate result.data exists before accessing
+            if not result or not hasattr(result, 'data') or not result.data:
                 return {"error": "No content crawled"}
-            
+
             documents = []
             for page in result.data:
                 doc = Document(
@@ -259,7 +271,7 @@ def register_ingest_tools(mcp):
                     }
                 )
                 documents.append(processor.inject_context(doc))
-            
+
             all_nodes = []
             for doc in documents:
                 all_nodes.extend(chunker.chunk_document(doc))

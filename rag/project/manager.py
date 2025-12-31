@@ -3,6 +3,7 @@ Project management functionality.
 """
 
 import re
+import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -21,6 +22,7 @@ class ProjectManager:
     def __init__(self):
         self._metadata = get_metadata_manager()
         self._current_project = settings.default_project
+        self._lock = threading.RLock()
     
     @property
     def current_project(self) -> str:
@@ -45,10 +47,22 @@ class ProjectManager:
                 continue
             if item.name == "chroma_db":
                 continue
-            projects.append(item.name)
-        
+
+            project_path = item
+            has_metadata = (project_path / settings.project_metadata_filename).exists()
+            has_chroma = (project_path / "chroma_db").exists()
+            has_docstore = (project_path / "docstore.json").exists()
+            has_index_store = (project_path / "index_store.json").exists()
+
+            if has_metadata or has_chroma or has_docstore or has_index_store:
+                projects.append(item.name)
+            else:
+                logger.debug(
+                    "Skipping project candidate without markers: %s", project_path
+                )
+
         return sorted(projects)
-    
+
     def project_exists(self, name: str) -> bool:
         """Check if project exists."""
         return name in self.discover_projects()
@@ -233,11 +247,12 @@ class ProjectManager:
                 },
                 None
             )
-        
-        # Switch if needed
-        if project != self._current_project:
-            get_index_manager().get_index(project)
-            self._current_project = project
+
+        # Switch if needed - atomic with lock
+        with self._lock:
+            if project != self._current_project:
+                get_index_manager().get_index(project)
+                self._current_project = project
         
         return None, project
     
@@ -302,7 +317,48 @@ class ProjectManager:
                     score += 1
             except Exception:
                 pass
-        
+
+        # File extension matches (indicates project type)
+        common_extensions = {
+            '.py': 'python',
+            '.js': 'javascript', '.ts': 'typescript', '.jsx': 'react', '.tsx': 'react',
+            '.go': 'go', '.rs': 'rust', '.java': 'java', '.cpp': 'cpp', '.c': 'c',
+            '.rb': 'ruby', '.php': 'php', '.swift': 'swift', '.kt': 'kotlin',
+            '.scala': 'scala', '.r': 'r', '.sh': 'shell', '.sql': 'sql',
+            '.vue': 'vue', '.svelte': 'svelte', '.astro': 'astro'
+        }
+
+        for ext, lang in common_extensions.items():
+            if ext in text.lower() and lang in project_lower:
+                score += 2
+
+        # Framework/library mentions
+        framework_patterns = {
+            'react': ['react', 'jsx', 'hooks', 'components'],
+            'vue': ['vue', 'template', 'reactive'],
+            'django': ['django', 'models', 'views', 'urls'],
+            'flask': ['flask', 'blueprint', 'jinja'],
+            'express': ['express', 'middleware', 'routes'],
+            'fastapi': ['fastapi', 'pydantic', 'endpoint'],
+            'spring': ['spring', 'bean', 'autowired'],
+            'rails': ['rails', 'activerecord', 'migration'],
+        }
+
+        for framework, keywords in framework_patterns.items():
+            if framework in project_lower:
+                for keyword in keywords:
+                    if keyword in text_lower:
+                        score += 1.5
+                        break
+
+        # Description matching (if available)
+        if metadata.description:
+            desc_words = set(re.findall(r'\b\w+\b', metadata.description.lower()))
+            text_words = set(re.findall(r'\b\w+\b', text))
+            overlap = len(desc_words & text_words)
+            if overlap > 0:
+                score += overlap * 0.5
+
         return score
     
     def choose_project(
@@ -409,13 +465,16 @@ class ProjectManager:
         return includes, excludes
 
 
-# Global singleton
+# Global singleton with thread-safe initialization
 _project_manager: Optional[ProjectManager] = None
+_project_manager_lock = threading.Lock()
 
 
 def get_project_manager() -> ProjectManager:
     """Get the global ProjectManager instance."""
     global _project_manager
     if _project_manager is None:
-        _project_manager = ProjectManager()
+        with _project_manager_lock:
+            if _project_manager is None:
+                _project_manager = ProjectManager()
     return _project_manager

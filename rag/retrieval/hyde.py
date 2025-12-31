@@ -3,47 +3,92 @@ HyDE (Hypothetical Document Embedding) functionality.
 """
 
 import os
+import time
+import threading
 from typing import List
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 from rag.config import settings, logger
+
+
+MAX_RETRIES = settings.hyde_max_retries
+INITIAL_BACKOFF_SECONDS = settings.hyde_initial_backoff
+
+_hyde_cache_lock = threading.Lock()
+_hyde_cache: dict[str, str] = {}
 
 
 def generate_hyde_query(question: str) -> str:
     """
     Generate a hypothetical answer for the question using LLM.
-    
-    HyDE creates a synthetic document that might answer the question,
-    which can improve retrieval for ambiguous queries.
-    
-    Args:
-        question: Original question
-        
-    Returns:
-        Generated hypothetical document, or original question on failure
+    Falls back to the original question on failure.
     """
-    openai_key = os.getenv("OPENAI_API_KEY")
-    if not openai_key:
+    if not os.getenv("OPENAI_API_KEY"):
         logger.warning("OPENAI_API_KEY missing, skipping HyDE")
         return question
-    
+
     try:
-        from llama_index.llms.openai import OpenAI
-        
-        llm = OpenAI(model="gpt-3.5-turbo", api_key=openai_key)
-        prompt = (
-            "Please write a brief passage to answer the question.\n"
-            "Question: {question}\n"
-            "Passage:"
-        )
-        response = llm.complete(prompt.format(question=question))
-        
-        result = str(response)
-        logger.debug(f"HyDE generated: {result[:100]}...")
-        return result
-        
+        return _generate_hyde_query_cached(question)
     except Exception as e:
         logger.error(f"HyDE generation failed: {e}")
         return question
+
+
+def _generate_hyde_query_cached(question: str) -> str:
+    openai_key = os.getenv("OPENAI_API_KEY")
+    from llama_index.llms.openai import OpenAI
+
+    cache_key = question
+
+    with _hyde_cache_lock:
+        if cache_key in _hyde_cache:
+            return _hyde_cache[cache_key]
+
+    prompt = (
+        "Please write a brief passage to answer the question.\n"
+        "Question: {question}\n"
+        "Passage:"
+    )
+    backoff = INITIAL_BACKOFF_SECONDS
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            llm = OpenAI(
+                model="gpt-3.5-turbo",
+                api_key=openai_key,
+                timeout=settings.hyde_timeout,
+            )
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    llm.complete,
+                    prompt.format(question=question)
+                )
+                response = future.result(timeout=settings.hyde_timeout)
+
+            result = str(response)
+            logger.debug(f"HyDE generated: {result[:100]}...")
+
+            with _hyde_cache_lock:
+                _hyde_cache[cache_key] = result
+
+            return result
+        except TimeoutError:
+            logger.error("HyDE generation timed out")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            raise
+        except Exception as e:
+            if attempt < MAX_RETRIES - 1:
+                logger.warning(
+                    "HyDE generation attempt %s failed: %s", attempt + 1, e
+                )
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            raise
 
 
 def should_trigger_hyde(nodes: List) -> bool:

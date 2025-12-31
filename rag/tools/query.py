@@ -130,26 +130,32 @@ def register_query_tools(mcp):
                 msg = "No matching projects found"
                 return {"error": msg} if return_metadata else msg
             
-            # Try projects in order of relevance score
             tried_projects = []
-            for candidate in candidates:
+            first_result = None
+            first_project = None
+            for idx, candidate in enumerate(candidates):
                 proj_name = candidate["project"]
                 tried_projects.append(proj_name)
-                
+
                 result, is_relevant = _search_project(engine, question, proj_name, **search_kwargs)
-                
+
+                if idx == 0:
+                    first_result = result
+                    first_project = proj_name
+
                 if is_relevant:
                     # Found relevant results - learn and return
                     mm.learn_from_query(proj_name, question, success=True)
                     logger.info(f"Found relevant results in project: {proj_name}")
                     return _format_result(result, proj_name, True, return_metadata, tried_projects)
-                
+
                 logger.info(f"Results from {proj_name} not relevant (score < {RELEVANCE_THRESHOLD}), trying next...")
-            
+
             # No relevant results in any project - return best attempt
-            best_project = candidates[0]["project"]
-            result, _ = _search_project(engine, question, best_project, **search_kwargs)
-            return _format_result(result, best_project, True, return_metadata, tried_projects, 
+            if first_result is None:
+                msg = "No matching projects found"
+                return {"error": msg} if return_metadata else msg
+            return _format_result(first_result, first_project, True, return_metadata, tried_projects,
                                   note="No highly relevant results found in any project")
             
         except Exception as e:

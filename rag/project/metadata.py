@@ -6,6 +6,8 @@ import json
 import os
 import re
 import tempfile
+import threading
+import time
 from contextlib import contextmanager
 from collections import Counter
 from datetime import datetime
@@ -37,23 +39,42 @@ STOP_WORDS = {
 }
 
 _WINDOWS_LOCK_LENGTH = 0x7fff0000
+LOCK_RETRY_ATTEMPTS = settings.lock_retry_attempts
+LOCK_RETRY_DELAY = settings.lock_retry_delay
 
 
 def _acquire_file_lock(lock_handle, path: Path) -> bool:
-    """Best-effort cross-platform file lock; logs on failure but continues."""
-    if fcntl and os.name != "nt":
-        try:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-            return True
-        except OSError as e:
-            logger.warning(f"Failed to lock {path}: {e}")
-    elif msvcrt and os.name == "nt":
-        try:
-            lock_handle.seek(0)
-            msvcrt.locking(lock_handle.fileno(), msvcrt.LK_LOCK, _WINDOWS_LOCK_LENGTH)
-            return True
-        except OSError as e:
-            logger.warning(f"Failed to lock {path}: {e}")
+    """Best-effort cross-platform file lock with retry logic; logs on failure but continues."""
+    max_retries = 3
+    retry_delay = 0.1  # 100ms
+
+    for attempt in range(max_retries):
+        if fcntl and os.name != "nt":
+            try:
+                # Try non-blocking lock first
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
+            except OSError as e:
+                if e.errno == 11:  # EAGAIN - would block
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay * (2 ** attempt))  # Exponential backoff
+                        continue
+                logger.warning(f"Failed to lock {path}: {e}")
+        elif msvcrt and os.name == "nt":
+            try:
+                lock_handle.seek(0)
+                msvcrt.locking(lock_handle.fileno(), msvcrt.LK_LOCK, _WINDOWS_LOCK_LENGTH)
+                return True
+            except OSError as e:
+                if e.errno == 33:  # ERROR_LOCK_VIOLATION
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay * (2 ** attempt))  # Exponential backoff
+                        continue
+                logger.warning(f"Failed to lock {path}: {e}")
+        else:
+            # No locking support
+            return False
+
     return False
 
 
@@ -74,17 +95,35 @@ def _release_file_lock(lock_handle, path: Path, locked: bool) -> None:
 @contextmanager
 def _file_lock(path: Path):
     """
-    Context manager to create the target file (if missing) and apply a
+    Context manager to create target file (if missing) and apply a
     best-effort lock; falls back to no-op on unsupported platforms.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     locked = False
     lock_handle = None
     try:
-        lock_handle = path.open("a+b")
-        locked = _acquire_file_lock(lock_handle, path)
-    except Exception as e:
+        # Try r+b mode first, fall back to w+b if not exists
+        try:
+            lock_handle = path.open("r+b")
+        except FileNotFoundError:
+            lock_handle = path.open("w+b")
+
+        for attempt in range(LOCK_RETRY_ATTEMPTS):
+            locked = _acquire_file_lock(lock_handle, path)
+            if locked:
+                break
+            time.sleep(LOCK_RETRY_DELAY * (2 ** attempt))
+    except OSError as e:
         logger.warning(f"Lock acquisition skipped for {path}: {e}")
+        if lock_handle:
+            try:
+                lock_handle.close()
+            except OSError as close_error:
+                logger.warning(f"Failed to close lock handle for {path}: {close_error}")
+        # Don't hold the file handle when skipping locking
+        yield
+        return
+
     try:
         yield
     finally:
@@ -109,6 +148,9 @@ def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
             tmp.flush()
             os.fsync(tmp.fileno())
         os.replace(temp_path, path)
+        # Verify the file was written
+        if not path.exists():
+            raise OSError(f"Failed to write {path}: os.replace() did not create file")
     finally:
         if temp_path and temp_path.exists():
             try:
@@ -124,6 +166,7 @@ class MetadataManager:
 
     def __init__(self):
         self._cache: Dict[str, ProjectMetadata] = {}
+        self._lock = threading.RLock()
 
     def _get_metadata_path(self, project: str) -> Path:
         """Get path to metadata file for a project."""
@@ -143,23 +186,24 @@ class MetadataManager:
         Returns:
             ProjectMetadata instance
         """
-        if project in self._cache:
-            return self._cache[project]
+        with self._lock:
+            if project in self._cache:
+                return self._cache[project]
 
-        meta_path = self._get_metadata_path(project)
-        metadata = ProjectMetadata(name=project)
+            meta_path = self._get_metadata_path(project)
+            metadata = ProjectMetadata(name=project)
 
-        if meta_path.exists():
-            try:
-                with meta_path.open("r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, dict):
-                        metadata = ProjectMetadata.from_dict(data)
-            except Exception as e:
-                logger.warning(f"Failed to load metadata for {project}: {e}")
+            if meta_path.exists():
+                try:
+                    with meta_path.open("r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        if isinstance(data, dict):
+                            metadata = ProjectMetadata.from_dict(data)
+                except Exception as e:
+                    logger.warning(f"Failed to load metadata for {project}: {e}")
 
-        self._cache[project] = metadata
-        return metadata
+            self._cache[project] = metadata
+            return metadata
 
     def save(
         self,
@@ -192,22 +236,33 @@ class MetadataManager:
         if initialize and not metadata.description:
             metadata.description = ""
 
-        try:
-            with _file_lock(meta_path):
-                _atomic_write_json(meta_path, metadata.to_dict())
-        except Exception as e:
-            logger.warning(f"Skipping lock for {meta_path}: {e}")
-            _atomic_write_json(meta_path, metadata.to_dict())
+        with self._lock:
+            write_success = False
+            try:
+                with _file_lock(meta_path):
+                    _atomic_write_json(meta_path, metadata.to_dict())
+                write_success = True
+            except Exception as e:
+                logger.warning(f"Skipping lock for {meta_path}: {e}")
+                try:
+                    _atomic_write_json(meta_path, metadata.to_dict())
+                    write_success = True
+                except Exception as e2:
+                    logger.error(f"Failed to write metadata for {project}: {e2}")
+                    raise
 
-        self._cache[project] = metadata
+            # Only update cache after successful write
+            if write_success:
+                self._cache[project] = metadata
         return metadata
 
     def ensure_exists(self, project: str) -> ProjectMetadata:
         """Ensure metadata file exists for project."""
-        meta_path = self._get_metadata_path(project)
-        if not meta_path.exists():
-            return self.save(project, initialize=True)
-        return self.load(project)
+        with self._lock:
+            meta_path = self._get_metadata_path(project)
+            if not meta_path.exists():
+                return self.save(project, initialize=True)
+            return self.load(project)
 
     def update(
         self,
@@ -252,16 +307,17 @@ class MetadataManager:
         source_hint: Optional[str] = None
     ) -> None:
         """Record indexing activity in metadata."""
-        metadata = self.load(project)
-        metadata.last_indexed = datetime.now().isoformat()
+        with self._lock:
+            metadata = self.load(project)
+            metadata.last_indexed = datetime.now().isoformat()
 
-        if source_hint:
-            paths = metadata.default_paths or []
-            if source_hint not in paths:
-                paths = (paths + [source_hint])[-5:]  # Keep last 5
-                metadata.default_paths = paths
+            if source_hint:
+                paths = metadata.default_paths or []
+                if source_hint not in paths:
+                    paths = (paths + [source_hint])[-5:]  # Keep last 5
+                    metadata.default_paths = paths
 
-        self.save(project, metadata)
+            self.save(project, metadata)
 
     def _normalize_list(self, value: Any) -> List[str]:
         """Normalize various inputs to list of strings."""
@@ -302,12 +358,19 @@ class MetadataManager:
 
         manifest["updated_at"] = datetime.now().isoformat()
 
+        write_success = False
         try:
             with _file_lock(manifest_path):
                 _atomic_write_json(manifest_path, manifest)
+            write_success = True
         except Exception as e:
             logger.warning(f"Skipping lock for {manifest_path}: {e}")
-            _atomic_write_json(manifest_path, manifest)
+            try:
+                _atomic_write_json(manifest_path, manifest)
+                write_success = True
+            except Exception as e2:
+                logger.error(f"Failed to write manifest: {e2}")
+                raise
 
     def clear_cache(self, project: Optional[str] = None) -> None:
         """Clear metadata cache."""
@@ -390,13 +453,16 @@ class MetadataManager:
             logger.info(f"Learned keywords for {project}: {new_keywords[:5]}")
 
 
-# Global singleton
+# Global singleton with thread-safe initialization
 _metadata_manager: Optional[MetadataManager] = None
+_metadata_manager_lock = threading.Lock()
 
 
 def get_metadata_manager() -> MetadataManager:
     """Get the global MetadataManager instance."""
     global _metadata_manager
     if _metadata_manager is None:
-        _metadata_manager = MetadataManager()
+        with _metadata_manager_lock:
+            if _metadata_manager is None:
+                _metadata_manager = MetadataManager()
     return _metadata_manager

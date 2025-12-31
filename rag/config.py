@@ -1,10 +1,11 @@
 """
-Centralized configuration for the RAG system.
+Centralized configuration for RAG system.
 
 All constants, settings, and configuration are defined here.
 """
 
 import os
+import threading
 import logging
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -15,14 +16,41 @@ from typing import Set, Dict, List, FrozenSet
 # Logging Configuration
 # ---------------------------------------------------------------------------
 
-def setup_logging(level: str = None) -> logging.Logger:
-    """Configure and return the RAG logger."""
+_setup_lock = threading.Lock()
+_logger_initialized = False
+
+
+def setup_logging(level: str = None, force: bool = False) -> logging.Logger:
+    """
+    Configure and return the RAG logger.
+
+    Args:
+        level: Log level (DEBUG, INFO, WARNING, ERROR)
+        force: If True, force reconfiguration even if already configured
+
+    Returns:
+        logging.Logger instance
+    """
+    global _logger_initialized
     log_level = level or os.getenv("RAG_LOG_LEVEL", "WARNING")
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    return logging.getLogger("rag")
+
+    with _setup_lock:
+        if _logger_initialized and not force:
+            return logging.getLogger("rag")
+
+        # Remove existing rag handlers to allow reconfiguration
+        root_logger = logging.getLogger()
+        for handler in root_logger.handlers[:]:
+            if "rag" in str(getattr(handler, 'name', '')):
+                root_logger.removeHandler(handler)
+
+        logging.basicConfig(
+            level=log_level,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            force=force
+        )
+        _logger_initialized = True
+        return logging.getLogger("rag")
 
 
 logger = setup_logging()
@@ -51,7 +79,7 @@ ALLOWED_EXTENSIONS: FrozenSet[str] = SUPPORTED_CODE_EXTS | SUPPORTED_DOC_EXTS | 
 
 
 # ---------------------------------------------------------------------------
-# Language Mapping for Code Splitting
+# Language Mapping for Code Splitting (Complete)
 # ---------------------------------------------------------------------------
 
 CODE_LANGUAGE_MAP: Dict[str, str] = {
@@ -71,7 +99,21 @@ CODE_LANGUAGE_MAP: Dict[str, str] = {
     '.php': 'php',
     '.yaml': 'yaml',
     '.yml': 'yaml',
-    '.json': 'json'
+    '.json': 'json',
+    '.swift': 'swift',
+    '.kt': 'kotlin',
+    '.scala': 'scala',
+    '.r': 'r',
+    '.sh': 'shell',
+    '.bash': 'shell',
+    '.zsh': 'shell',
+    '.sql': 'sql',
+    '.toml': 'toml',
+    '.dockerfile': 'dockerfile',
+    '.makefile': 'makefile',
+    '.vue': 'vue',
+    '.svelte': 'svelte',
+    '.astro': 'astro',
 }
 
 LANGUAGE_TO_EXTENSIONS: Dict[str, List[str]] = {
@@ -98,7 +140,9 @@ LANGUAGE_TO_EXTENSIONS: Dict[str, List[str]] = {
     "markdown": [".md", ".markdown"],
     "vue": [".vue"],
     "svelte": [".svelte"],
-    "astro": [".astro"]
+    "astro": [".astro"],
+    "dockerfile": [".dockerfile"],
+    "makefile": [".makefile", "Makefile"],
 }
 
 
@@ -127,13 +171,15 @@ DEFAULT_EXCLUDES: FrozenSet[str] = frozenset({
 # ---------------------------------------------------------------------------
 
 CODE_INDICATOR_FILES: FrozenSet[str] = frozenset({
-    'package.json', 'requirements.txt', 'Cargo.toml', 'go.mod',
-    'pom.xml', 'build.gradle', 'Makefile', 'CMakeLists.txt'
+    'package.json', 'requirements.txt', 'requirements-dev.txt',
+    'pyproject.toml', 'setup.py', 'setup.cfg', 'Pipfile', 'Pipfile.lock',
+    'poetry.lock', 'Cargo.toml', 'go.mod', 'pom.xml', 'build.gradle',
+    'Makefile', 'CMakeLists.txt', 'environment.yml'
 })
 
 CODE_INDICATOR_DIRS: FrozenSet[str] = frozenset({
-    '.git', '.vscode', '.idea', 'src', 'lib', 'include',
-    'node_modules', 'venv'
+    '.git', '.vscode', '.idea', '.github', 'src', 'lib', 'include',
+    'apps', 'services', 'packages', 'node_modules', 'venv'
 })
 
 
@@ -141,52 +187,76 @@ CODE_INDICATOR_DIRS: FrozenSet[str] = frozenset({
 # Settings Class
 # ---------------------------------------------------------------------------
 
+VALID_EMBEDDING_PROVIDERS: FrozenSet[str] = frozenset({"openai", "gemini"})
+
+
 @dataclass
 class RAGSettings:
-    """Central configuration for the RAG system."""
-    
+    """Central configuration for RAG system."""
+
     # Paths
     script_dir: Path = field(default_factory=lambda: Path(__file__).parent.parent.absolute())
     storage_path: Path = field(init=False)
-    
+
     # Embedding
-    embedding_provider: str = field(default_factory=lambda: os.getenv("EMBEDDING_PROVIDER", "openai"))
-    embedding_model: str = field(default_factory=lambda: os.getenv("EMBEDDING_MODEL", "text-embedding-3-large"))
-    
+    embedding_provider: str = field(init=False)
+    embedding_model: str = field(init=False)
+
     # Chunking
     chunk_size: int = 1024
     chunk_overlap: int = 200
     code_chunk_lines: int = 40
     code_chunk_overlap: int = 15
     code_max_chars: int = 1500
-    
+
     # Retrieval
     min_top_k: int = 1
     max_top_k: int = 50
     default_top_k: int = 6
     rerank_candidate_multiplier: int = 2
     min_rerank_candidates: int = 10
-    
+
     # Thresholds
     low_score_threshold: float = 0.2
     rerank_delta_threshold: float = 0.05
     rerank_min_results: int = 3
     hyde_trigger_min_results: int = 1
     hyde_trigger_score: float = 0.1
-    
+    hyde_timeout: float = 30.0
+    hyde_max_retries: int = 2
+    hyde_initial_backoff: float = 0.5
+
+    # API Server
+    request_buffer_size: int = 200
+    log_buffer_size: int = 400
+
+    # Locking
+    lock_retry_attempts: int = 3
+    lock_retry_delay: float = 0.1
+
     # File constraints
     max_file_size_mb: int = 100
     max_query_length: int = 10000
-    
+
     # Project defaults
     default_project: str = "rag_collection"
     project_metadata_filename: str = "project_metadata.json"
     ingest_manifest_filename: str = "ingest_manifest.json"
     tracking_filename: str = "indexed_files.json"
-    
+
     def __post_init__(self):
         self.storage_path = self.script_dir / "storage"
-        
+
+        # Validate embedding provider
+        provider = os.getenv("EMBEDDING_PROVIDER", "openai").lower()
+        if provider not in VALID_EMBEDDING_PROVIDERS:
+            raise ValueError(
+                f"Invalid EMBEDDING_PROVIDER: {provider}. "
+                f"Valid providers: {VALID_EMBEDDING_PROVIDERS}"
+            )
+        self.embedding_provider = provider
+        self.embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-large")
+
     @property
     def max_file_size_bytes(self) -> int:
         return self.max_file_size_mb * 1024 * 1024

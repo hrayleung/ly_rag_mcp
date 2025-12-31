@@ -26,7 +26,7 @@ def get_embedding_model() -> BaseEmbedding:
     if provider == "openai":
         require_openai_key()
         logger.info(f"Using OpenAI embeddings: {model}")
-        return OpenAIEmbedding(model=model)
+        return OpenAIEmbedding(model=model, timeout=30.0)
     
     elif provider == "gemini":
         from google import genai
@@ -49,7 +49,7 @@ def get_embedding_model() -> BaseEmbedding:
             def __init__(self, model: str, api_key: str):
                 super().__init__(model_name=model)
                 self._model = model
-                self._client = genai.Client(api_key=api_key)
+                self._client = genai.Client(api_key=api_key, timeout=30.0)
             
             def _get_query_embedding(self, query: str) -> list[float]:
                 response = self._client.models.embed_content(
