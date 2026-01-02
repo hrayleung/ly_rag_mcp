@@ -1,37 +1,43 @@
 <template>
   <section class="panel request-panel">
     <div class="panel-header">
-      <h2>Live Requests</h2>
+      <div class="header-title">LIVE REQUESTS</div>
       <div v-if="requests.length" class="pulse-indicator"></div>
     </div>
-    <div class="panel-content">
-      <table class="request-table" aria-label="Live request table">
+
+    <div class="table-container">
+      <table class="request-table">
         <thead>
           <tr>
-            <th width="80">Status</th>
-            <th>Method / Route</th>
-            <th>Tool</th>
-            <th class="align-right">Duration</th>
+            <th class="col-status">STATUS</th>
+            <th class="col-method">METHOD</th>
+            <th class="col-route">ROUTE</th>
+            <th class="col-tool">TOOL</th>
+            <th class="col-latency align-right">LATENCY</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="(r, i) in requests" :key="i" class="request-row">
-            <td>
-              <span class="status-dot" :class="r.status || 'ok'"></span>
+            <td class="col-status">
+              <span class="status-box" :class="r.status || 'ok'">
+                {{ (r.status === 'error' ? 'ERR' : 'OK') }}
+              </span>
             </td>
-            <td>
-              <div class="route-info">
-                <span class="method">POST</span>
-                <span class="route">{{ r.route }}</span>
-              </div>
+            <td class="col-method">
+              <span class="method-text mono">POST</span>
             </td>
-            <td class="tool-cell">{{ r.tool || '—' }}</td>
-            <td class="latency-cell align-right">
-              {{ r.latency }}<span class="unit">ms</span>
+            <td class="col-route">
+              <span class="route-text mono">{{ r.route }}</span>
+            </td>
+            <td class="col-tool">
+              <span class="tool-text">{{ r.tool || '—' }}</span>
+            </td>
+            <td class="col-latency align-right">
+              <span class="latency-val mono">{{ r.latency }}</span><span class="unit">ms</span>
             </td>
           </tr>
           <tr v-if="!requests.length" class="empty-row">
-            <td colspan="4" class="empty-state">
+            <td colspan="5" class="empty-state">
               <span>Waiting for requests...</span>
             </td>
           </tr>
@@ -43,129 +49,126 @@
 
 <script setup lang="ts">
 import type { RequestEntry } from '@/composables/useMcpApi'
-defineProps<{ requests: RequestEntry[]; outlined?: boolean }>()
+defineProps<{ requests: RequestEntry[] }>()
 </script>
 
 <style scoped>
 .panel {
   display: flex;
   flex-direction: column;
-  gap: 16px;
   height: 100%;
-  animation: fadeIn 0.3s var(--ease);
 }
 
 .panel-header {
+  height: 40px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 4px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
 }
 
-h2 {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--text);
+.header-title {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--fg-muted);
 }
 
 .pulse-indicator {
-  width: 6px;
-  height: 6px;
+  width: 4px;
+  height: 4px;
   background: var(--success);
   border-radius: 50%;
-  animation: pulse-opacity 2s infinite;
+  box-shadow: 0 0 8px var(--success);
+  animation: pulse 2s infinite;
 }
 
-@keyframes pulse-opacity {
-  0% { opacity: 0.4; }
+@keyframes pulse {
+  0% { opacity: 0.2; }
   50% { opacity: 1; }
-  100% { opacity: 0.4; }
+  100% { opacity: 0.2; }
 }
 
-.panel-content {
+.table-container {
   flex: 1;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--bg-warm);
+  overflow-y: auto;
+  background: var(--bg-panel); /* Slightly distinct from header */
 }
 
+/* Table Layout */
 .request-table {
   width: 100%;
   border-collapse: collapse;
-  font-family: var(--font-mono);
-  font-size: 12px;
+  table-layout: fixed; /* Strict layout */
 }
 
 .request-table th {
+  position: sticky;
+  top: 0;
   text-align: left;
-  padding: 12px 16px;
-  font-weight: 500;
-  color: var(--muted);
-  border-bottom: 1px solid var(--line);
-  font-family: var(--font-body);
-  font-size: 11px;
+  padding: 8px 16px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-muted);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  z-index: 1;
 }
 
 .request-table td {
   padding: 12px 16px;
-  border-bottom: 1px solid var(--line-dim);
-  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--fg-dim);
+  height: 48px; /* Fixed row height */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.request-row:last-child td {
-  border-bottom: none;
+.request-row:hover td {
+  background: var(--bg-hover);
+  color: var(--fg);
 }
 
-.request-row:hover {
-  background: var(--panel-light);
-}
+/* Column Widths */
+.col-status { width: 60px; }
+.col-method { width: 80px; }
+.col-route { width: 30%; }
+.col-tool { width: auto; }
+.col-latency { width: 100px; }
 
-/* Status */
-.status-dot {
-  display: block;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--muted);
-}
-.status-dot.ok { background: var(--success); }
-.status-dot.error { background: var(--error); }
-
-/* Route Info */
-.route-info {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.method {
+/* Cell Styling */
+.status-box {
   font-size: 10px;
-  font-weight: 600;
-  color: var(--muted);
-  background: var(--bg);
-  padding: 2px 4px;
-  border-radius: 4px;
-  border: 1px solid var(--line-dim);
+  font-weight: 700;
+  font-family: var(--font-mono);
+}
+.status-box.ok { color: var(--success); }
+.status-box.error { color: var(--error); }
+
+.method-text {
+  font-size: 11px;
+  opacity: 0.7;
 }
 
-.route {
-  color: var(--text);
+.route-text {
+  color: var(--fg);
 }
 
-/* Cells */
-.tool-cell {
-  opacity: 0.8;
+.tool-text {
+  color: var(--fg-muted);
 }
 
-.latency-cell {
-  font-feature-settings: "tnum";
+.latency-val {
+  color: var(--fg);
 }
 
 .unit {
-  color: var(--muted);
   font-size: 10px;
+  color: var(--fg-muted);
   margin-left: 2px;
 }
 
@@ -175,8 +178,9 @@ h2 {
 
 .empty-state {
   text-align: center;
-  padding: 48px 0;
-  color: var(--muted);
-  font-family: var(--font-body);
+  padding: 64px 0;
+  color: var(--fg-muted);
+  font-size: 13px;
+  border-bottom: none;
 }
 </style>

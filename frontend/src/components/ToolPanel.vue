@@ -2,8 +2,8 @@
   <section class="panel tool-panel">
     <div class="panel-header">
       <div class="header-left">
-        <h2>Available Tools</h2>
-        <span class="tool-count">{{ tools.length }}</span>
+        <h2 class="section-label">AVAILABLE TOOLS</h2>
+        <span class="tool-count mono">{{ tools.length }}</span>
       </div>
       <div class="filter-controls">
         <button
@@ -17,24 +17,19 @@
         </button>
       </div>
     </div>
-    <div class="panel-content">
+
+    <div class="list-container">
       <div class="tool-list" aria-label="Tool list">
         <div class="tool-row" v-for="t in filtered" :key="t.name">
-          <div class="row-icon">
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
-              <path d="M13 2H3a1 1 0 00-1 1v10a1 1 0 001 1h10a1 1 0 001-1V3a1 1 0 00-1-1z" />
-              <path d="M8 5v6M5 8h6" />
-            </svg>
-          </div>
           <div class="row-content">
             <div class="tool-name">
-              {{ t.name }}
-              <span class="tool-badge">{{ t.type }}</span>
+              <span class="name-text">{{ t.name }}</span>
+              <span class="badge mono">{{ t.type }}</span>
             </div>
             <div class="tool-desc">{{ t.desc }}</div>
           </div>
           <button class="invoke-btn" @click="$emit('invoke', t.name)">
-            <span>Run</span>
+            RUN
           </button>
         </div>
 
@@ -50,7 +45,7 @@
 import { computed } from 'vue'
 import type { Tool } from '@/composables/useMcpApi'
 
-const props = defineProps<{ tools: Tool[]; toolFilter: string; outlined?: boolean }>()
+const props = defineProps<{ tools: Tool[]; toolFilter: string }>()
 
 const filtered = computed(() =>
   props.toolFilter === 'all' ? props.tools : props.tools.filter(t => t.type === props.toolFilter)
@@ -61,16 +56,17 @@ const filtered = computed(() =>
 .panel {
   display: flex;
   flex-direction: column;
-  gap: 16px;
   height: 100%;
-  animation: fadeIn 0.35s var(--ease);
 }
 
 .panel-header {
+  height: 40px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 4px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
 }
 
 .header-left {
@@ -79,63 +75,55 @@ const filtered = computed(() =>
   gap: 8px;
 }
 
-h2 {
+.section-label {
   margin: 0;
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--text);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--fg-muted);
 }
 
 .tool-count {
-  font-size: 11px;
-  color: var(--muted);
-  background: var(--bg-warm);
-  padding: 2px 6px;
-  border-radius: 4px;
-  border: 1px solid var(--line);
+  font-size: 10px;
+  color: var(--fg-muted);
+  background: var(--bg-hover);
+  padding: 1px 4px;
+  border-radius: 2px;
 }
 
 /* Filters */
 .filter-controls {
   display: flex;
-  gap: 4px;
-  background: var(--bg-warm);
-  padding: 2px;
-  border-radius: 6px;
-  border: 1px solid var(--line);
+  gap: 16px;
 }
 
 .filter-btn {
-  padding: 4px 10px;
-  font-size: 11px;
-  color: var(--muted);
-  border-radius: 4px;
-  text-transform: capitalize;
+  font-size: 10px;
+  color: var(--fg-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+  padding: 4px 0;
   transition: all 0.2s ease;
 }
 
 .filter-btn:hover {
-  color: var(--text);
+  color: var(--fg);
 }
 
 .filter-btn.active {
-  background: var(--bg-elevated);
-  color: var(--text);
-  box-shadow: var(--shadow-xs);
+  color: var(--fg);
+  border-bottom: 1px solid var(--fg); /* Minimal underscore */
 }
 
-/* Tool List */
-.panel-content {
+/* List */
+.list-container {
   flex: 1;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--bg-warm);
+  overflow-y: auto;
+  background: var(--bg-panel);
 }
 
 .tool-list {
-  height: 100%;
-  overflow-y: auto;
   display: flex;
   flex-direction: column;
 }
@@ -143,65 +131,46 @@ h2 {
 .tool-row {
   display: flex;
   align-items: center;
-  gap: 12px;
+  justify-content: space-between;
   padding: 12px 16px;
-  border-bottom: 1px solid var(--line-dim);
-  transition: background 0.1s ease;
-}
-
-.tool-row:last-child {
-  border-bottom: none;
+  border-bottom: 1px solid var(--border);
+  gap: 16px;
 }
 
 .tool-row:hover {
-  background: var(--panel-light);
+  background: var(--bg-hover);
 }
 
-/* Icon */
-.row-icon {
-  width: 32px;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  color: var(--muted);
-}
-.row-icon svg { width: 16px; height: 16px; }
-
-/* Content */
 .row-content {
   flex: 1;
-  min-width: 0; /* Text truncation fix */
+  min-width: 0;
 }
 
 .tool-name {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  color: var(--text);
-  margin-bottom: 2px;
   display: flex;
   align-items: center;
   gap: 8px;
+  margin-bottom: 4px;
 }
 
-.tool-badge {
-  font-family: var(--font-body);
-  font-size: 10px;
-  color: var(--muted);
-  background: var(--bg);
-  padding: 1px 5px;
-  border-radius: 3px;
-  border: 1px solid var(--line-dim);
+.name-text {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg);
+}
+
+.badge {
+  font-size: 9px;
+  color: var(--fg-muted);
+  border: 1px solid var(--border-active);
+  padding: 1px 4px;
+  border-radius: 2px;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
 }
 
 .tool-desc {
   font-size: 12px;
-  color: var(--text-dim);
+  color: var(--fg-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -209,25 +178,26 @@ h2 {
 
 /* Actions */
 .invoke-btn {
-  padding: 6px 12px;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text);
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  transition: all 0.2s ease;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg);
+  border: 1px solid var(--border-active);
+  padding: 4px 8px;
+  border-radius: 2px;
+  background: transparent;
+  transition: all 0.1s ease;
 }
 
 .invoke-btn:hover {
-  border-color: var(--text-dim);
-  background: var(--bg-elevated);
+  background: var(--fg);
+  color: var(--bg);
+  border-color: var(--fg);
 }
 
 .empty-state {
   padding: 40px;
   text-align: center;
-  color: var(--muted);
+  color: var(--fg-muted);
   font-size: 13px;
 }
 </style>

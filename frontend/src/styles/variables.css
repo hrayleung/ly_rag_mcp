@@ -1,72 +1,45 @@
 :root {
   /*
-   * CORE PALETTE
-   * Based on factory.ai's deep, clean dark mode aesthetic.
-   * Removing purple/blue tints in favor of true neutrals.
+   * FACTORY.AI STRICT PALETTE
+   * Ultra-minimal, high contrast, industrial dark mode.
    */
   --bg: #050505;
-  --bg-warm: #0a0a0a;     /* Slightly lighter for panels */
-  --bg-elevated: #111111; /* Modals, dropdowns */
+  --bg-panel: #0A0A0A;
+  --bg-elevated: #111111;
+  --bg-hover: #171717;
 
-  --panel: #0a0a0a;
-  --panel-light: #171717; /* Hover states */
-  --panel-glass: rgba(10, 10, 10, 0.9);
+  /* Borders - Barely there dividers */
+  --border: #1F1F1F;
+  --border-active: #333333;
 
-  /* Borders - Subtle separation only */
-  --line: #1F1F1F;
-  --line-dim: #141414;
-  --line-active: #333333;
+  /* Text */
+  --fg: #E4E4E7;      /* Primary White/Silver */
+  --fg-muted: #71717A; /* Muted Zinc */
+  --fg-dim: #3F3F46;   /* Very dim/disabled */
 
-  /* Text - High contrast primary, muted secondary */
-  --text: #F4F4F5;       /* Zinc-100 equivalent */
-  --text-dim: #A1A1AA;   /* Zinc-400 equivalent */
-  --muted: #52525B;      /* Zinc-600 equivalent */
-  --muted-dim: #3F3F46;  /* Zinc-700 equivalent */
-
-  /*
-   * ACCENTS
-   * Removing Champagne/Teal clash.
-   * Primary accent is now White/Silver for high-end feel.
-   * Brand accent (Factory Green/Blue) used sparingly.
-   */
-  --accent: #E4E4E7;      /* Primary White/Silver */
+  /* Accents */
+  --accent: #FAFAFA;       /* High-contrast interactive */
   --accent-dim: rgba(255, 255, 255, 0.05);
-  --accent-glow: rgba(255, 255, 255, 0.1);
 
-  /* Secondary/Brand Accent - Factory.ai uses a distinct teal/blue or sometimes orange */
-  /* Using a clean blue-gray for "active" states to match the screenshot vibes */
-  --accent-brand: #3B82F6;
-  --accent-brand-dim: rgba(59, 130, 246, 0.1);
+  /* Brand - Minimal usage */
+  --brand: #3B82F6;
+  --brand-dim: rgba(59, 130, 246, 0.1);
 
-  /* Status Colors - Desaturated for dark mode */
+  /* Status - High saturation, small surface area (dots/text) */
   --success: #10B981;
-  --success-dim: rgba(16, 185, 129, 0.1);
   --warning: #F59E0B;
-  --warning-dim: rgba(245, 158, 11, 0.1);
   --error: #EF4444;
-  --error-dim: rgba(239, 68, 68, 0.1);
 
-  /* Shapes */
-  --radius-sm: 4px;
-  --radius: 8px;          /* Tighter radius for pro feel */
-  --radius-lg: 12px;
-  --radius-pill: 9999px;
+  /* Typography */
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
 
-  /* Shadows - Deep, black, no color tint */
-  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.5);
-  --shadow-sm: 0 4px 6px -1px rgba(0, 0, 0, 0.5);
-  --shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.7);
-  --shadow-lg: 0 20px 25px -5px rgba(0, 0, 0, 0.8);
+  /* Spacing */
+  --radius: 4px;
+  --radius-lg: 8px;
+  --space-unit: 4px;
 
   /* Animation */
-  --ease: cubic-bezier(0.16, 1, 0.3, 1); /* Apple-style ease out */
-  --duration-fast: 150ms;
-  --duration: 250ms;
-  --duration-slow: 400ms;
-
-  /* No grids, no decorative gradients in variables */
-  --grid: none;
-  --gradient-accent: none;
-  --gradient-panel: none;
-  --gradient-border: none;
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --duration: 150ms;
 }

@@ -1,57 +1,48 @@
 <template>
   <aside class="sidebar">
-    <div class="section-title">Navigation</div>
-    <div class="nav-list">
-      <button
-        class="nav-item"
-        :class="{ active: activePanel === 'requests' }"
-        @click="$emit('panel', 'requests')"
-      >
-        <span class="nav-label">Requests</span>
-        <span class="nav-count" v-if="stats.rpm">{{ stats.rpm }}</span>
-      </button>
-      <button
-        class="nav-item"
-        :class="{ active: activePanel === 'tools' }"
-        @click="$emit('panel', 'tools')"
-      >
-        <span class="nav-label">Tools</span>
-        <span class="nav-count">{{ toolsLength }}</span>
-      </button>
-      <button
-        class="nav-item"
-        :class="{ active: activePanel === 'logs' }"
-        @click="$emit('panel', 'logs')"
-      >
-        <span class="nav-label">Logs</span>
-      </button>
+    <div class="nav-section">
+      <div class="section-label">NAVIGATE</div>
+      <div class="nav-list">
+        <button
+          class="nav-item"
+          :class="{ active: activePanel === 'requests' }"
+          @click="$emit('panel', 'requests')"
+        >
+          <span class="nav-text">Requests</span>
+          <span class="nav-meta mono" v-if="stats.rpm">{{ stats.rpm }}</span>
+        </button>
+        <button
+          class="nav-item"
+          :class="{ active: activePanel === 'tools' }"
+          @click="$emit('panel', 'tools')"
+        >
+          <span class="nav-text">Tools</span>
+          <span class="nav-meta mono">{{ toolsLength }}</span>
+        </button>
+      </div>
     </div>
 
-    <!-- Spacer -->
-    <div style="flex: 1"></div>
-
-    <div class="section-title">Controls</div>
-    <div class="action-list">
-      <button class="action-btn" @click="$emit('refresh')">
-        Refresh Data
-      </button>
-      <button class="action-btn" @click="$emit('simulate')">
-        Test Trigger
-      </button>
-      <button class="action-btn danger" @click="$emit('clear-log')">
-        Clear Logs
-      </button>
+    <!-- Controls -->
+    <div class="nav-section">
+      <div class="section-label">ACTIONS</div>
+      <div class="nav-list">
+        <button class="nav-item action" @click="$emit('refresh')">Refresh</button>
+        <button class="nav-item action" @click="$emit('simulate')">Test Trigger</button>
+        <button class="nav-item action danger" @click="$emit('clear-log')">Clear Logs</button>
+      </div>
     </div>
 
-    <div class="section-title">System Status</div>
-    <div class="stats-minimal">
+    <div class="spacer"></div>
+
+    <!-- System Info -->
+    <div class="system-section">
       <div class="stat-row">
-        <span>Uptime</span>
-        <span class="mono">{{ stats.uptime || '—' }}</span>
+        <span class="stat-label">UPTIME</span>
+        <span class="stat-val mono">{{ stats.uptime || '—' }}</span>
       </div>
       <div class="stat-row">
-        <span>Errors</span>
-        <span class="mono" :class="{ 'has-errors': stats.errors }">{{ stats.errors ?? 0 }}</span>
+        <span class="stat-label">ERRORS</span>
+        <span class="stat-val mono" :class="{ 'text-error': stats.errors }">{{ stats.errors ?? 0 }}</span>
       </div>
     </div>
   </aside>
@@ -59,34 +50,31 @@
 
 <script setup lang="ts">
 interface StatsVm { uptime?: string; rpm?: number | null; errors?: number | null }
-const props = defineProps<{ stats: StatsVm; toolsLength: number; activePanel: string }>()
+defineProps<{ stats: StatsVm; toolsLength: number; activePanel: string }>()
 </script>
 
 <style scoped>
 .sidebar {
-  grid-area: sidebar;
+  padding: 24px 16px;
   display: flex;
   flex-direction: column;
-  gap: 24px;
-  padding: 12px 4px;
-  animation: slideInRight 0.4s var(--ease);
+  gap: 32px;
+  height: 100%;
 }
 
-.section-title {
-  font-size: 11px;
+.section-label {
+  font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--muted);
-  padding-left: 12px;
-  margin-bottom: -12px; /* Pull closer to content */
+  letter-spacing: 0.1em;
+  color: var(--fg-muted);
+  margin-bottom: 12px;
+  padding-left: 8px;
 }
 
-/* Nav Items - Minimal "Folder" style */
 .nav-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }
 
 .nav-item {
@@ -94,86 +82,75 @@ const props = defineProps<{ stats: StatsVm; toolsLength: number; activePanel: st
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  padding: 8px 12px;
-  border-radius: var(--radius);
-  color: var(--text-dim);
-  font-size: 14px;
-  font-weight: 500;
-  transition: all 0.2s ease;
-}
-
-.nav-item:hover {
-  color: var(--text);
-  background: var(--panel-light);
-}
-
-.nav-item.active {
-  color: var(--text);
-  background: var(--bg-elevated);
-  box-shadow: 0 0 0 1px var(--line);
-}
-
-.nav-count {
-  font-size: 11px;
-  background: var(--bg);
-  padding: 2px 6px;
-  border-radius: 4px;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  border: 1px solid var(--line-dim);
-}
-
-/* Actions */
-.action-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.action-btn {
-  width: 100%;
-  text-align: left;
-  padding: 8px 12px;
+  padding: 8px 12px; /* Increased horizontal padding */
   font-size: 13px;
-  color: var(--text-dim);
-  border: 1px solid transparent;
+  color: var(--fg-muted);
   border-radius: var(--radius);
-  transition: all 0.2s ease;
+  transition: all 0.1s ease;
+  border-left: 2px solid transparent; /* Prepare for active border */
 }
 
-.action-btn:hover {
-  border-color: var(--line);
-  background: var(--panel-light);
-  color: var(--text);
+/* Hover State */
+.nav-item:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
 }
 
-.action-btn.danger:hover {
+/* Active State */
+.nav-item.active {
+  color: var(--fg);
+  background: var(--bg-hover);
+  border-left-color: var(--fg); /* Minimal active indicator */
+}
+
+.nav-meta {
+  font-size: 11px;
+  opacity: 0.5;
+}
+
+.action {
+  justify-content: flex-start;
+}
+
+.action.danger:hover {
   color: var(--error);
-  border-color: var(--error-dim);
-  background: rgba(239, 68, 68, 0.05); /* Error tint */
+  background: rgba(239, 68, 68, 0.05); /* Slight red tint */
 }
 
-/* Minimal Stats */
-.stats-minimal {
+.spacer {
+  flex: 1;
+}
+
+/* System Stats */
+.system-section {
+  padding: 16px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 0 12px;
 }
 
 .stat-row {
   display: flex;
   justify-content: space-between;
+  align-items: center;
+}
+
+.stat-label {
+  font-size: 10px;
+  color: var(--fg-muted);
+  font-weight: 500;
+  letter-spacing: 0.05em;
+}
+
+.stat-val {
   font-size: 12px;
-  color: var(--muted);
+  color: var(--fg);
 }
 
-.mono {
-  font-family: var(--font-mono);
-  color: var(--text-dim);
-}
-
-.has-errors {
+.text-error {
   color: var(--error);
 }
 </style>

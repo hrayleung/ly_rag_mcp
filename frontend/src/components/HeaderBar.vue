@@ -7,18 +7,20 @@
             <path stroke="currentColor" stroke-width="1.5" d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
           </svg>
         </div>
-        <div>
+        <div class="brand-text">
           <h1>Ly</h1>
+          <span class="brand-divider">/</span>
+          <span class="brand-context">Factory</span>
         </div>
       </div>
       <div class="header-right">
-        <div class="status-indicator" :class="{ ok: true }">
+        <div class="status-indicator">
           <span class="status-dot"></span>
-          <span class="status-label">Live</span>
+          <span class="status-label mono">LIVE</span>
         </div>
         <div class="latency-badge">
-          <span class="latency-label">Latency</span>
-          <span class="latency-value">{{ latencyLabel }}</span>
+          <span class="latency-label">LATENCY</span>
+          <span class="latency-value mono">{{ latencyLabel }}</span>
         </div>
       </div>
     </div>
@@ -26,43 +28,36 @@
 </template>
 
 <script setup lang="ts">
-const props = defineProps<{ latencyLabel: string }>()
+defineProps<{ latencyLabel: string }>()
 </script>
 
 <style scoped>
 .header {
-  grid-area: header;
+  height: 100%;
   display: flex;
   align-items: center;
-  background: transparent;
-  width: 100%;
-  animation: fadeIn var(--duration) var(--ease);
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
 }
 
 .header-content {
   width: 100%;
-  padding: 0 4px; /* Align with sidebar padding */
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 20px;
 }
 
+/* Brand Section */
 .brand {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 16px;
 }
 
-/* Minimalist Logo Mark */
 .logo-mark {
-  width: 32px;
-  height: 32px;
+  color: var(--fg);
   display: flex;
   align-items: center;
-  justify-content: center;
-  color: var(--text);
-  opacity: 0.9;
 }
 
 .brand-icon {
@@ -70,24 +65,37 @@ const props = defineProps<{ latencyLabel: string }>()
   height: 20px;
 }
 
+.brand-text {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+
 h1 {
   margin: 0;
-  font-family: var(--font-display);
-  font-size: 16px;
   font-weight: 600;
-  letter-spacing: -0.01em;
-  color: var(--text);
+  color: var(--fg);
+  font-size: 14px;
+}
+
+.brand-divider {
+  color: var(--border-active);
+}
+
+.brand-context {
+  color: var(--fg-muted);
 }
 
 /* Right Section */
 .header-right {
   display: flex;
   align-items: center;
-  gap: 24px;
+  gap: 32px;
 }
 
-/* Status Indicator - Minimal dot */
-.status-indicator {
+/* Indicators */
+.status-indicator, .latency-badge {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -98,39 +106,18 @@ h1 {
   height: 6px;
   background: var(--success);
   border-radius: 50%;
-  position: relative;
+  box-shadow: 0 0 8px var(--success); /* Small glow */
 }
 
-.status-dot::after {
-  content: '';
-  position: absolute;
-  inset: -2px;
-  border-radius: 50%;
-  border: 1px solid var(--success);
-  opacity: 0.3;
-}
-
-.status-label {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-dim);
-}
-
-/* Latency - Plain text */
-.latency-badge {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-
-.latency-label {
-  font-size: 12px;
-  color: var(--muted);
+.status-label, .latency-label {
+  font-size: 11px;
+  color: var(--fg-muted);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
 }
 
 .latency-value {
-  font-family: var(--font-mono);
   font-size: 12px;
-  color: var(--text-dim);
+  color: var(--fg);
 }
 </style>

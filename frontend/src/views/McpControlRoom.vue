@@ -1,9 +1,9 @@
 <template>
-  <div class="app layout-container">
-    <!-- Header Spans Full Width -->
-    <HeaderBar :latency-label="latencyLabel" />
+  <div class="app-layout">
+    <!-- Top Header -->
+    <HeaderBar :latency-label="latencyLabel" class="header-area" />
 
-    <!-- Sidebar (Left) -->
+    <!-- Left Sidebar -->
     <StatsSidebar
       :active-panel="activePanel"
       :stats="statsVm"
@@ -12,18 +12,18 @@
       @refresh="loadAll"
       @simulate="simulateTrigger"
       @clear-log="clearLog"
+      class="sidebar-area"
     />
 
-    <!-- Main Content Area -->
-    <main class="main">
-      <div class="top-row">
-        <!-- Request Panel (Left Top) -->
-         <div class="panel-wrapper requests-wrapper">
+    <!-- Main Workspace -->
+    <main class="main-area">
+      <!-- Upper Grid: Requests & Tools -->
+      <div class="upper-grid">
+        <div class="panel-container border-right">
           <RequestPanel :requests="requests.value?.data || []" />
         </div>
 
-        <!-- Tool Panel (Right Top) -->
-        <div class="panel-wrapper tools-wrapper">
+        <div class="panel-container">
           <ToolPanel
             :tools="tools.value?.data || []"
             :tool-filter="toolFilter"
@@ -33,8 +33,8 @@
         </div>
       </div>
 
-      <!-- Log Panel (Bottom Full Width) -->
-      <div class="panel-wrapper logs-wrapper">
+      <!-- Lower Grid: Logs -->
+      <div class="lower-grid border-top">
         <LogPanel :logs="logs.value?.data || []" />
       </div>
     </main>
@@ -91,74 +91,122 @@ onBeforeUnmount(() => stop())
 </script>
 
 <style scoped>
-.app {
-  min-height: 100vh;
+/* Main Grid Construction */
+.app-layout {
   display: grid;
-  padding: 24px;
-  gap: 24px;
-  /* Updated Grid Layout */
+  height: 100vh;
+  width: 100vw;
   grid-template-columns: 240px 1fr;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: 48px 1fr;
   grid-template-areas:
     "header header"
     "sidebar main";
+  background: var(--bg);
+  overflow: hidden;
 }
 
-/* Make header span full width but respect grid gap */
-/* Wait, header is inside grid area header */
+/* Header */
+.header-area {
+  grid-area: header;
+  border-bottom: 1px solid var(--border);
+  z-index: 10;
+  background: var(--bg); /* Ensure opaque */
+}
 
-.main {
+/* Sidebar */
+.sidebar-area {
+  grid-area: sidebar;
+  border-right: 1px solid var(--border);
+  background: var(--bg-panel);
+  overflow-y: auto;
+}
+
+/* Main Area */
+.main-area {
   grid-area: main;
-  display: flex;
-  flex-direction: column;
-  gap: 24px;
-  min-height: 0; /* Fix flex overflow */
-}
-
-.top-row {
   display: grid;
-  grid-template-columns: 1.2fr 0.8fr; /* Requests get more space */
-  gap: 24px;
-  height: 55%; /* Top section height */
-  min-height: 400px;
+  grid-template-rows: 60% 40%;
+  min-height: 0;
+  background: var(--bg);
 }
 
-.panel-wrapper {
+/* Upper Grid Split (Requests 65% / Tools 35%) */
+.upper-grid {
+  display: grid;
+  grid-template-columns: 65% 35%;
   min-height: 0;
+}
+
+.panel-container {
+  height: 100%;
+  overflow: hidden;
+  position: relative;
   display: flex;
   flex-direction: column;
 }
 
-.logs-wrapper {
-  flex: 1;
-  min-height: 300px;
+/* Lower Grid (Logs) */
+.lower-grid {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Borders Utilities */
+.border-right {
+  border-right: 1px solid var(--border);
+}
+.border-top {
+  border-top: 1px solid var(--border);
 }
 
 /* Responsive */
 @media (max-width: 1200px) {
-  .app {
-    grid-template-columns: 200px 1fr;
+  .upper-grid {
+    grid-template-columns: 55% 45%;
   }
 }
 
 @media (max-width: 1024px) {
-  .app {
+  .app-layout {
     grid-template-columns: 1fr;
+    grid-template-rows: 48px auto 1fr;
     grid-template-areas:
       "header"
       "sidebar"
       "main";
-    height: auto;
-    overflow-y: auto;
+    overflow-y: auto; /* Allow full page scroll */
   }
 
-  .main {
+  .sidebar-area {
+    height: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .main-area {
+    display: flex;
+    flex-direction: column;
     height: auto;
   }
 
-  .top-row {
-    grid-template-columns: 1fr;
+  .upper-grid {
+    display: flex;
+    flex-direction: column;
     height: auto;
+  }
+
+  .panel-container {
+    height: 500px;
+  }
+
+  .border-right {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .lower-grid {
+    height: 400px;
   }
 }
 </style>

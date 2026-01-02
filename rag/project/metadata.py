@@ -95,41 +95,47 @@ def _release_file_lock(lock_handle, path: Path, locked: bool) -> None:
 @contextmanager
 def _file_lock(path: Path):
     """
-    Context manager to create target file (if missing) and apply a
-    best-effort lock; falls back to no-op on unsupported platforms.
+    Context manager to create a separate lock file and apply a
+    best-effort lock; raises TimeoutError if lock fails.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
     locked = False
     lock_handle = None
     try:
-        # Try r+b mode first, fall back to w+b if not exists
-        try:
-            lock_handle = path.open("r+b")
-        except FileNotFoundError:
-            lock_handle = path.open("w+b")
+        # Use a separate lock file
+        # w+b is fine because we don't care about content, just the file handle
+        lock_handle = lock_path.open("w+b")
 
         for attempt in range(LOCK_RETRY_ATTEMPTS):
-            locked = _acquire_file_lock(lock_handle, path)
+            locked = _acquire_file_lock(lock_handle, lock_path)
             if locked:
                 break
             time.sleep(LOCK_RETRY_DELAY * (2 ** attempt))
-    except OSError as e:
-        logger.warning(f"Lock acquisition skipped for {path}: {e}")
+
+        if not locked:
+            raise TimeoutError(f"Could not acquire lock for {path} (via {lock_path})")
+
+        yield
+
+    except (OSError, TimeoutError) as e:
+        logger.warning(f"Lock acquisition failed for {path}: {e}")
         if lock_handle:
             try:
                 lock_handle.close()
-            except OSError as close_error:
-                logger.warning(f"Failed to close lock handle for {path}: {close_error}")
-        # Don't hold the file handle when skipping locking
-        yield
-        return
+            except OSError:
+                pass
+        raise  # Re-raise to prevent unsafe operations
 
-    try:
-        yield
     finally:
         if lock_handle:
-            _release_file_lock(lock_handle, path, locked)
-            lock_handle.close()
+            if locked:
+                _release_file_lock(lock_handle, lock_path, locked)
+            try:
+                lock_handle.close()
+            except OSError:
+                pass
 
 
 def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:

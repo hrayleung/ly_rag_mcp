@@ -1,18 +1,9 @@
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400;500&display=swap');
 @import './styles/variables.css';
 
 :root {
-  /*
-   * TYPOGRAPHY
-   * Using Space Grotesk purely for display/headings.
-   * System fonts for UI text (cleanest, most native feel).
-   */
-  --font-display: 'Space Grotesk', system-ui, -apple-system, sans-serif;
-  --font-body: system-ui, -apple-system, sans-serif;
-  --font-mono: 'JetBrains Mono', monospace;
-
-  font-family: var(--font-body);
+  font-family: var(--font-sans);
   background: var(--bg);
+  color: var(--fg);
   /* Smoother font rendering for dark mode */
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -25,9 +16,10 @@ html {
 
 html, body, #app {
   margin: 0;
-  min-height: 100%;
+  height: 100%;
+  width: 100%;
   background: var(--bg);
-  color: var(--text);
+  overflow: hidden; /* App handles scrolling per-panel */
 }
 
 /* Base styles */
@@ -36,13 +28,13 @@ html, body, #app {
 }
 
 a {
-  color: var(--text);
+  color: var(--fg);
   text-decoration: none;
-  transition: color var(--duration-fast) var(--ease);
+  transition: color var(--duration) var(--ease);
 }
 
 a:hover {
-  color: var(--text-dim);
+  color: var(--fg-muted);
 }
 
 button {
@@ -53,31 +45,23 @@ button {
   background: transparent;
   padding: 0;
   color: inherit;
+  transition: all var(--duration) var(--ease);
 }
 
 button:focus-visible {
-  outline: 2px solid var(--accent-brand);
+  outline: 1px solid var(--accent);
   outline-offset: 2px;
-  border-radius: 2px;
 }
 
-code {
+code, pre {
   font-family: var(--font-mono);
-  font-size: 0.85em; /* Slightly smaller for balance */
-  background: var(--bg-elevated);
-  padding: 0.2em 0.4em;
-  border-radius: 4px;
-  color: var(--text);
-  border: 1px solid var(--line-dim);
+  font-size: 0.85em;
 }
 
-/*
- * SCROLLBAR
- * Minimal, dark scrollbar that fades into the background.
- */
+/* Scrollbar - Hidden by default, visible on hover/scroll */
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
@@ -85,43 +69,27 @@ code {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #27272a; /* Zinc-800 */
-  border-radius: 5px;
-  border: 2px solid var(--bg); /* Creates padding effect */
+  background: #27272a;
+  border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #3f3f46; /* Zinc-700 */
+  background: #3f3f46;
 }
 
 /* Selection */
 ::selection {
-  background: rgba(255, 255, 255, 0.2);
-  color: white;
+  background: rgba(255, 255, 255, 0.99); /* Stark contrast */
+  color: black;
 }
 
-/*
- * ANIMATIONS
- * Single, cohesive fade-in animation for page loads.
- * Removing the slide/scale variations to reduce visual noise.
- */
+/* Animations */
 @keyframes fadeIn {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
-/* Utility classes for layout */
-.layout-container {
-  max-width: 1400px;
-  margin: 0 auto;
-  padding: 0 24px;
-}
-
-/* Prefers reduced motion */
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
-    animation-duration: 0.001ms !important;
-    transition-duration: 0.001ms !important;
-    scroll-behavior: auto !important;
-  }
-}
+/* Utils */
+.mono { font-family: var(--font-mono); }
+.text-muted { color: var(--fg-muted); }
+.text-dim { color: var(--fg-dim); }

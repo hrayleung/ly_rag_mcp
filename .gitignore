@@ -40,3 +40,6 @@ data/
 .mcp.json
 mcp.json
 CLAUDE.md
+
+# Node.js
+node_modules/

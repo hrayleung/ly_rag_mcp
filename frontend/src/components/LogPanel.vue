@@ -1,19 +1,21 @@
 <template>
   <section class="panel log-panel">
     <div class="panel-header">
-      <h2>Server Logs</h2>
+      <h2 class="section-label">SYSTEM LOGS</h2>
       <div class="actions">
-        <button v-if="logs.length" class="text-btn" @click="$emit('clear-log')">Clear</button>
+        <!-- Optional Actions if needed -->
       </div>
     </div>
     <div class="panel-content">
       <div class="log-container" ref="logContainer">
         <div v-for="(line, i) in logs" :key="i" class="log-line">
+          <span class="gutter">{{ i + 1 }}</span>
           <span class="timestamp">{{ getTimestamp(line) }}</span>
-          <span class="message">{{ getMessage(line) }}</span>
+          <span class="divider">|</span>
+          <span class="message" :class="getMessageClass(line)">{{ getMessage(line) }}</span>
         </div>
         <div v-if="!logs.length" class="empty-state">
-           Waiting for server events...
+           <span class="cursor">_</span> Waiting for server events...
         </div>
       </div>
     </div>
@@ -23,7 +25,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 
-const props = defineProps<{ logs: string[]; outlined?: boolean }>()
+defineProps<{ logs: string[] }>()
 const logContainer = ref<HTMLElement | null>(null)
 
 function getTimestamp(line: string): string {
@@ -34,59 +36,53 @@ function getTimestamp(line: string): string {
 function getMessage(line: string): string {
   return line.replace(/^\[[^\]]+\]\s*/, '')
 }
+
+function getMessageClass(line: string): string {
+  if (line.toLowerCase().includes('error')) return 'msg-error'
+  if (line.toLowerCase().includes('warn')) return 'msg-warn'
+  if (line.includes('Invoked')) return 'msg-info'
+  return ''
+}
 </script>
 
 <style scoped>
 .panel {
   display: flex;
   flex-direction: column;
-  gap: 16px;
   height: 100%;
-  animation: fadeIn 0.4s var(--ease);
 }
 
 .panel-header {
+  height: 40px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 4px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
 }
 
-h2 {
+.section-label {
   margin: 0;
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--text);
-}
-
-.text-btn {
-  font-size: 11px;
-  color: var(--muted);
-  text-decoration: underline;
-  text-decoration-color: transparent;
-  transition: all 0.2s ease;
-}
-
-.text-btn:hover {
-  color: var(--text);
-  text-decoration-color: var(--line);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--fg-muted);
 }
 
 .panel-content {
   flex: 1;
   overflow: hidden;
-  background: black; /* Terminal feel */
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
+  background: #000; /* Pure black terminal */
 }
 
 .log-container {
   height: 100%;
   overflow-y: auto;
   font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.6;
-  padding: 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 12px 16px;
   display: flex;
   flex-direction: column;
 }
@@ -94,25 +90,51 @@ h2 {
 .log-line {
   display: flex;
   gap: 12px;
-  color: var(--text-dim);
+  color: var(--fg-muted);
+}
+
+.gutter {
+  color: #333;
+  user-select: none;
+  width: 24px;
+  text-align: right;
+  flex-shrink: 0;
 }
 
 .timestamp {
-  color: var(--muted);
+  color: var(--fg-dim);
   flex-shrink: 0;
   min-width: 60px;
   user-select: none;
 }
 
-.message {
-  word-break: break-word;
-  color: #D4D4D8; /* Zinc-300 */
+.divider {
+  color: #333;
+  user-select: none;
 }
 
+.message {
+  word-break: break-word;
+  color: var(--fg);
+}
+
+/* Semantics */
+.msg-error { color: var(--error); }
+.msg-warn { color: var(--warning); }
+.msg-info { color: var(--brand); }
+
 .empty-state {
-  color: var(--muted-dim);
-  font-style: italic;
+  color: var(--fg-dim);
   padding: 20px 0;
-  text-align: center;
+  font-family: var(--font-mono);
+}
+
+.cursor {
+  animation: blink 1s step-end infinite;
+  color: var(--fg);
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
 }
 </style>
