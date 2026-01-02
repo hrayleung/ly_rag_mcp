@@ -12,7 +12,7 @@ Local RAG system with OpenAI/Gemini embeddings, hybrid search (semantic + BM25),
 - **Smart Project Routing**: Multi-project isolation with automatic query routing to best project
 - **Multiple Embedding Providers**: OpenAI or Google Gemini
 - **Models**: OpenAI `text-embedding-3-large` or Gemini `text-embedding-004` + Cohere `rerank-v3.5`
-- **MCP Integration**: Works with Claude Code, Chatwise, Cherry Studio
+- **MCP Integration**: Works with standard MCP clients (Claude Desktop, Chatwise, Cherry Studio, etc.)
 - **68+ File Formats**: Code (49 ext), Docs (16 ext), Images (3 ext) via LlamaIndex readers
 - **Local Storage**: Per-project ChromaDB vector databases under `storage/{project}/`
 - **Optional Vue.js UI**: Real-time MCP monitoring at `/` when running api_server.py
@@ -232,14 +232,20 @@ Automatically switches to hybrid search when query contains:
 - Uppercase patterns: `[A-Z_]{2,}`
 - Code characters: `{}();=<>*/+-`
 - Path-like tokens: `/`, `\`
-- Dots in tokens (e.g., `module.function`)
+- Dots in tokens with 3+ trailing chars (e.g., `module.function`)
 - >30% uppercase or >40% digits
 
 ### HyDE (Hypothetical Document Embeddings)
-- **Trigger**: Results ≤ 1 OR max score ≤ 0.1
+- **Trigger**: Results ≤ 1 OR max score ≤ 0.1 OR all scores < 0.2
 - **Process**: Generates synthetic answer using OpenAI GPT-3.5, embeds it, searches with that embedding
 - **Timeout**: 30 seconds
 - **Retries**: 2 with exponential backoff (0.5s → 1s)
+
+### Optional Vue.js UI
+- **Aesthetic**: Minimal dark industrial style using Inter and JetBrains Mono fonts.
+- **Mechanism**: Auto-polls `api_server.py` every 3 seconds using `Promise.all` for parallel data fetching.
+- **Features**: Live request monitoring, latency tracking, terminal-style log viewer.
+- **Run**: `python api_server.py` and visit `http://localhost:8000`.
 
 ### Reranking (Cohere v3.5)
 - **Retrieval**: 2x `top_k` candidates (minimum 10)

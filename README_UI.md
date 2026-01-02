@@ -41,11 +41,13 @@ frontend/src/
   - Error count
   - Active tools
 
-### Design System
-- Dark theme with green accent (`#b4ff3f`) and orange secondary (`#ff9f1c`)
-- Google Fonts: Saira Semi Condensed (UI) and IBM Plex Mono (code)
-- CSS Grid responsive layout
-- CSS custom properties in `variables.css`
+### Design System (Dark Industrial Style)
+- **Aesthetic**: Minimal dark industrial with near-black background (`#050505`) and zinc/silver text.
+- **Fonts**:
+  - **UI**: Inter (sans-serif) via Google Fonts
+  - **Code/Terminal**: JetBrains Mono (monospace) via Google Fonts
+- **Layout**: CSS Grid responsive layout with subtle 1px border dividers (`#1F1F1F`).
+- **Transitions**: 150ms cubic-bezier ease for hover states.
 
 ## Run HTTP API + UI (dev backend)
 
