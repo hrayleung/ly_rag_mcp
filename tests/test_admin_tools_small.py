@@ -23,6 +23,8 @@ def _register(monkeypatch, pm=None, im=None, cm=None, settings=None):
             list_projects=lambda: {"details": [{"name": "p"}], "count": 1},
             create_project=lambda project: None,
             set_project_metadata=lambda project, keywords, description: None,
+            project_exists=lambda name: name == "p",
+            validate_name=lambda name: (True, ""),
             choose_project=lambda desc, max_candidates=3: {
                 "recommendation": "p",
                 "candidates": [{"project": "p"}],
@@ -66,6 +68,8 @@ def test_manage_project_create_update_switch(monkeypatch):
         list_projects=lambda: {"details": [], "count": 0},
         create_project=create_project,
         set_project_metadata=lambda project, keywords, description: (project, keywords, description),
+        project_exists=lambda name: True, # Assume exists for test
+        validate_name=lambda name: (True, ""),
         choose_project=lambda desc, max_candidates=3: {"error": "no_projects"},
     )
     im = SimpleNamespace(current_project=None, stats=SimpleNamespace(index_loads=0, index_cache_hits=0, cache_hit_rate=0.5), switch_project=switch_project)

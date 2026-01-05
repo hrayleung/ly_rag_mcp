@@ -93,7 +93,9 @@ class RerankerManager:
             # Update stats to reflect the failed rerank attempt
             with self._lock:
                 self._stats.reranker_loads += 1
-            return nodes[:top_n] if top_n else nodes
+            # Use max_top_k as fallback when top_n is None to prevent returning all nodes
+            fallback_top_n = top_n if top_n is not None else settings.max_top_k
+            return nodes[:fallback_top_n]
 
     def should_apply_rerank(
         self,
@@ -128,9 +130,6 @@ class RerankerManager:
         sorted_scores = sorted(scores, reverse=True)
         top_score = sorted_scores[0]
         second_score = sorted_scores[1]
-
-        if top_score is None or second_score is None:
-            return True
 
         # If top results are very close, reranking can help
         if abs(top_score - second_score) < settings.rerank_delta_threshold:

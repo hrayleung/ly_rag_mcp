@@ -7,7 +7,7 @@ from rag.retrieval.hyde import generate_hyde_query
 
 
 def setup_function(_):
-    hyde._generate_hyde_query_cached.cache_clear()
+    hyde._hyde_cache.clear()
 
 
 def test_generate_hyde_uses_configured_timeout(monkeypatch):

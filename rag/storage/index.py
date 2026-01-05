@@ -96,9 +96,10 @@ class IndexManager:
         Returns:
             VectorStoreIndex instance
         """
-        target_project = project or self._current_project or settings.default_project
-
         with self._lock:
+            # Calculate target_project inside lock to prevent race condition
+            target_project = project or self._current_project or settings.default_project
+
             # Check cache
             if (self._index is not None
                 and self._current_project == target_project):
@@ -148,26 +149,37 @@ class IndexManager:
     ) -> int:
         """
         Insert nodes into the index.
-        
+
         Args:
             nodes: List of nodes to insert
             project: Target project
             show_progress: Show progress bar
-            
+
         Returns:
             Number of nodes inserted
         """
-        index = self.get_index(project)
-        index.insert_nodes(nodes, show_progress=show_progress)
-        return len(nodes)
+        with self._lock:
+            target_project = project or self._current_project or settings.default_project
+
+            # Verify we're working on correct project
+            if self._current_project != target_project:
+                self.get_index(target_project)  # This will switch and load
+
+            if self._index is not None:
+                with log_timing("index:insert_nodes", project=target_project):
+                    self._index.insert_nodes(nodes, show_progress=show_progress)
+                return len(nodes)
+
+        return 0  # Should not reach here
     
     def persist(self, project: Optional[str] = None) -> None:
         """Persist the index to disk."""
-        target_project = project or self._current_project or settings.default_project
-        project_path = settings.storage_path / target_project
-
         with self._lock:
-            if self._index is not None:
+            target_project = project or self._current_project or settings.default_project
+
+            # Only persist if current project matches target
+            if self._index is not None and self._current_project == target_project:
+                project_path = settings.storage_path / target_project
                 with log_timing("index:persist", project=target_project):
                     self._index.storage_context.persist(persist_dir=str(project_path))
 
@@ -179,6 +191,10 @@ class IndexManager:
                         logger.warning(f"Failed to fsync index files: {e}")
 
                 logger.debug(f"Persisted index for {target_project}")
+            elif self._index is not None:
+                logger.warning(
+                    f"Skipping persist for {target_project} - current project is {self._current_project}"
+                )
 
     def reset(self) -> None:
         """Reset the cached index."""
@@ -231,7 +247,20 @@ class IndexManager:
         Returns:
             LlamaIndex retriever
         """
+        # Store original value for accurate logging
+        original_top_k = similarity_top_k
         top_k = similarity_top_k or settings.default_top_k
+
+        # Validate and clamp top_k to safe bounds
+        if not isinstance(top_k, int):
+            top_k = int(top_k)
+        if top_k < settings.min_top_k:
+            logger.warning(f"top_k too small ({original_top_k}), using {settings.min_top_k}")
+            top_k = settings.min_top_k
+        if top_k > settings.max_top_k:
+            logger.warning(f"top_k too large ({original_top_k}), using {settings.max_top_k}")
+            top_k = settings.max_top_k
+
         index = self.get_index(project)
         return index.as_retriever(similarity_top_k=top_k)
 

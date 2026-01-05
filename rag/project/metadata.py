@@ -10,7 +10,7 @@ import threading
 import time
 from contextlib import contextmanager
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -27,6 +27,12 @@ try:
 except ImportError:
     msvcrt = None
 
+# Get current process ID for lock file ownership tracking
+try:
+    _CURRENT_PID = os.getpid()
+except Exception:
+    _CURRENT_PID = None
+
 # Common stop words to exclude from keywords
 STOP_WORDS = {
     'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
@@ -41,10 +47,21 @@ STOP_WORDS = {
 _WINDOWS_LOCK_LENGTH = 0x7fff0000
 LOCK_RETRY_ATTEMPTS = settings.lock_retry_attempts
 LOCK_RETRY_DELAY = settings.lock_retry_delay
+STALE_LOCK_THRESHOLD_SECONDS = 300  # 5 minutes
 
 
 def _acquire_file_lock(lock_handle, path: Path) -> bool:
-    """Best-effort cross-platform file lock with retry logic; logs on failure but continues."""
+    """
+    Best-effort cross-platform file lock with retry logic.
+
+    Returns:
+        bool: True if lock acquired, False if locking unavailable
+
+    Note:
+        Logs warning when file locking is unavailable on the platform.
+        Requires fcntl (Unix) or msvcrt (Windows) for proper locking.
+        On platforms without locking support, returns False and logs a warning.
+    """
     max_retries = 3
     retry_delay = 0.1  # 100ms
 
@@ -72,7 +89,12 @@ def _acquire_file_lock(lock_handle, path: Path) -> bool:
                         continue
                 logger.warning(f"Failed to lock {path}: {e}")
         else:
-            # No locking support
+            # No locking support - log warning once per session
+            logger.warning(
+                f"File locking unavailable on this platform ({os.name}). "
+                f"Concurrent access to {path} is not protected. "
+                f"Install platform-specific locking modules (fcntl/msvcrt)."
+            )
             return False
 
     return False
@@ -93,10 +115,21 @@ def _release_file_lock(lock_handle, path: Path, locked: bool) -> None:
 
 
 @contextmanager
-def _file_lock(path: Path):
+def _file_lock(path: Path, force_break_stale_locks: bool = False):
     """
-    Context manager to create a separate lock file and apply a
-    best-effort lock; raises TimeoutError if lock fails.
+    Context manager to create a separate lock file and apply a best-effort lock.
+
+    Args:
+        path: Path to the file being locked
+        force_break_stale_locks: If True, breaks locks older than STALE_LOCK_THRESHOLD_SECONDS
+
+    Raises:
+        TimeoutError: If lock cannot be acquired after retries
+
+    Note:
+        Lock files contain timestamp and PID for stale lock detection.
+        Stale locks (>5 minutes old) are automatically broken to handle crashed processes.
+        Lock file is cleaned up on both success and exception paths.
     """
     lock_path = path.with_suffix(path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -104,9 +137,35 @@ def _file_lock(path: Path):
     locked = False
     lock_handle = None
     try:
-        # Use a separate lock file
-        # w+b is fine because we don't care about content, just the file handle
+        # Check for stale lock and break if necessary
+        if lock_path.exists() and force_break_stale_locks:
+            try:
+                lock_stat = lock_path.stat()
+                lock_age = time.time() - lock_stat.st_mtime
+                if lock_age > STALE_LOCK_THRESHOLD_SECONDS:
+                    logger.info(
+                        f"Breaking stale lock for {path} "
+                        f"(age: {lock_age:.1f}s > {STALE_LOCK_THRESHOLD_SECONDS}s)"
+                    )
+                    lock_path.unlink(missing_ok=True)
+            except OSError as e:
+                logger.warning(f"Failed to check/break stale lock {lock_path}: {e}")
+
+        # Use a separate lock file with timestamp and PID
         lock_handle = lock_path.open("w+b")
+
+        # Write lock metadata (timestamp + PID) for stale detection
+        try:
+            lock_data = json.dumps({
+                "timestamp": time.time(),
+                "pid": _CURRENT_PID,
+                "path": str(path)
+            })
+            lock_handle.write(lock_data.encode("utf-8"))
+            lock_handle.flush()
+            os.fsync(lock_handle.fileno())
+        except (OSError, AttributeError) as e:
+            logger.warning(f"Failed to write lock metadata: {e}")
 
         for attempt in range(LOCK_RETRY_ATTEMPTS):
             locked = _acquire_file_lock(lock_handle, lock_path)
@@ -120,15 +179,11 @@ def _file_lock(path: Path):
         yield
 
     except (OSError, TimeoutError) as e:
-        logger.warning(f"Lock acquisition failed for {path}: {e}")
-        if lock_handle:
-            try:
-                lock_handle.close()
-            except OSError:
-                pass
+        logger.warning(f"Lock operation failed for {path}: {e}")
         raise  # Re-raise to prevent unsafe operations
 
     finally:
+        # Always cleanup lock file, even on exception
         if lock_handle:
             if locked:
                 _release_file_lock(lock_handle, lock_path, locked)
@@ -137,11 +192,30 @@ def _file_lock(path: Path):
             except OSError:
                 pass
 
+        # Delete lock file (Bug H7 fix)
+        try:
+            lock_path.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning(f"Failed to delete lock file {lock_path}: {e}")
+
 
 def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
     """
-    Atomically write JSON to disk using a temp file and os.replace,
-    ensuring durability via flush + fsync and cleaning temp files on failure.
+    Atomically write JSON to disk using a temp file and os.replace.
+
+    Ensures durability via flush + fsync. Raises exception on directory fsync
+    failure to prevent silent data loss on power failure.
+
+    Args:
+        path: Destination file path
+        payload: JSON-serializable dictionary to write
+
+    Raises:
+        OSError: If atomic write or directory fsync fails
+
+    Note:
+        Directory fsync is critical for durability - if rename crashes before
+        directory metadata persists, the file may be lost on power failure.
     """
     temp_path: Optional[Path] = None
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -154,6 +228,22 @@ def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
             tmp.flush()
             os.fsync(tmp.fileno())
         os.replace(temp_path, path)
+
+        # Fsync parent directory for durability (ensures rename persists on crash)
+        # Bug H9 fix: Re-raise exception instead of just logging
+        try:
+            dir_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError as e:
+            logger.error(
+                f"Critical: Failed to fsync parent directory for {path}: {e}. "
+                f"Data may be lost on power failure. System may not support directory fsync."
+            )
+            raise  # Re-raise to prevent silent data loss
+
         # Verify the file was written
         if not path.exists():
             raise OSError(f"Failed to write {path}: os.replace() did not create file")
@@ -205,9 +295,22 @@ class MetadataManager:
                         data = json.load(f)
                         if isinstance(data, dict):
                             metadata = ProjectMetadata.from_dict(data)
+                            # Bug M7 fix: Only cache if successfully loaded from disk
+                            self._cache[project] = metadata
+                            return metadata
+                except PermissionError as e:
+                    # Bug M8 fix: Provide actionable guidance for permission errors
+                    logger.error(
+                        f"Permission denied reading metadata for {project}: {e}\n"
+                        f"File: {meta_path}\n"
+                        f"Check file permissions and ensure read access is available."
+                    )
+                    # Don't cache - let caller use default metadata
                 except Exception as e:
                     logger.warning(f"Failed to load metadata for {project}: {e}")
+                    # Bug M7 fix: Don't cache corrupted data, use default
 
+            # Cache only valid/default metadata
             self._cache[project] = metadata
             return metadata
 
@@ -243,23 +346,9 @@ class MetadataManager:
             metadata.description = ""
 
         with self._lock:
-            write_success = False
-            try:
-                with _file_lock(meta_path):
-                    _atomic_write_json(meta_path, metadata.to_dict())
-                write_success = True
-            except Exception as e:
-                logger.warning(f"Skipping lock for {meta_path}: {e}")
-                try:
-                    _atomic_write_json(meta_path, metadata.to_dict())
-                    write_success = True
-                except Exception as e2:
-                    logger.error(f"Failed to write metadata for {project}: {e2}")
-                    raise
-
-            # Only update cache after successful write
-            if write_success:
-                self._cache[project] = metadata
+            with _file_lock(meta_path):
+                _atomic_write_json(meta_path, metadata.to_dict())
+            self._cache[project] = metadata
         return metadata
 
     def ensure_exists(self, project: str) -> ProjectMetadata:
@@ -325,6 +414,29 @@ class MetadataManager:
 
             self.save(project, metadata)
 
+    def track_chat_turn(self, project: str) -> None:
+        """
+        Record a chat turn/activity in metadata.
+
+        Updates last_chat_time to current UTC timestamp and increments
+        chat_turn_count. Uses file locking for thread safety.
+
+        Args:
+            project: Project name
+
+        Example:
+            >>> mm = get_metadata_manager()
+            >>> mm.track_chat_turn("my_project")
+            >>> metadata = mm.load("my_project")
+            >>> assert metadata.chat_turn_count == 1
+            >>> assert metadata.last_chat_time is not None
+        """
+        with self._lock:
+            metadata = self.load(project)
+            metadata.last_chat_time = datetime.now(timezone.utc).isoformat()
+            metadata.chat_turn_count = (metadata.chat_turn_count or 0) + 1
+            self.save(project, metadata)
+
     def _normalize_list(self, value: Any) -> List[str]:
         """Normalize various inputs to list of strings."""
         if value is None:
@@ -364,19 +476,8 @@ class MetadataManager:
 
         manifest["updated_at"] = datetime.now().isoformat()
 
-        write_success = False
-        try:
-            with _file_lock(manifest_path):
-                _atomic_write_json(manifest_path, manifest)
-            write_success = True
-        except Exception as e:
-            logger.warning(f"Skipping lock for {manifest_path}: {e}")
-            try:
-                _atomic_write_json(manifest_path, manifest)
-                write_success = True
-            except Exception as e2:
-                logger.error(f"Failed to write manifest: {e2}")
-                raise
+        with _file_lock(manifest_path):
+            _atomic_write_json(manifest_path, manifest)
 
     def clear_cache(self, project: Optional[str] = None) -> None:
         """Clear metadata cache."""

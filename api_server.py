@@ -31,7 +31,7 @@ from functools import lru_cache
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from rag.config import setup_logging, settings
+from rag.config import setup_logging, settings, validate_required_keys
 from rag.storage.index import get_index_manager
 from rag.storage.chroma import get_chroma_manager
 
@@ -41,6 +41,14 @@ from rag.storage.chroma import get_chroma_manager
 ROOT = Path(__file__).parent
 FRONTEND_DIST = ROOT / "frontend" / "dist"
 LOG = setup_logging()
+
+# Validate API keys at startup
+try:
+    validate_required_keys()
+    LOG.info("API key validation passed")
+except ValueError as e:
+    LOG.error(f"API key validation failed: {e}")
+    raise
 
 # ---------------------------------------------------------------------------
 # Telemetry buffers
@@ -107,6 +115,9 @@ async def record_requests(request: Request, call_next):
     try:
         response = await call_next(request)
         return response
+    except Exception as e:
+        LOG.error(f"HTTP request failed: {e}", exc_info=True, extra={"path": str(request.url.path), "method": request.method})
+        response = None
     finally:
         duration_ms = (time.perf_counter() - start) * 1000
         status = response.status_code if response else 500

@@ -40,7 +40,10 @@ def _register(monkeypatch, pm=None, mm=None, engine=None):
             choose_project=lambda q, max_candidates=2: {"candidates": [{"project": "p1"}, {"project": "p2"}]},
         )
     if mm is None:
-        mm = SimpleNamespace(learn_from_query=lambda project, question, success=True: None)
+        mm = SimpleNamespace(
+            learn_from_query=lambda project, question, success=True: None,
+            track_chat_turn=lambda project: None
+        )
     if engine is None:
         engine = SimpleNamespace(
             search=lambda question, project, **kwargs: FakeResult(
@@ -77,7 +80,10 @@ def test_format_result_metadata_and_text(monkeypatch):
 def test_query_rag_single_project(monkeypatch):
     pm = SimpleNamespace(discover_projects=lambda: ["only"], choose_project=lambda q, max_candidates=1: {})
     engine = SimpleNamespace(search=lambda question, project, **kwargs: FakeResult(results=[FakeDoc("t", score=0.9)], total=1))
-    mm = SimpleNamespace(learn_from_query=lambda project, question, success=True: None)
+    mm = SimpleNamespace(
+        learn_from_query=lambda project, question, success=True: None,
+        track_chat_turn=lambda project: None
+    )
     mcp = _register(monkeypatch, pm=pm, mm=mm, engine=engine)
 
     out = mcp.query_rag("q")
@@ -97,7 +103,10 @@ def test_query_rag_auto_routes_best_effort(monkeypatch):
         discover_projects=lambda: ["p1", "p2"],
         choose_project=lambda q, max_candidates=2: {"candidates": [{"project": "p1"}, {"project": "p2"}]},
     )
-    mm = SimpleNamespace(learn_from_query=lambda project, question, success=True: None)
+    mm = SimpleNamespace(
+        learn_from_query=lambda project, question, success=True: None,
+        track_chat_turn=lambda project: None
+    )
     mcp = _register(monkeypatch, pm=pm, mm=mm, engine=engine)
 
     out = mcp.query_rag("q")

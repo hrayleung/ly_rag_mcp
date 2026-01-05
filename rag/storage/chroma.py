@@ -52,6 +52,18 @@ class ChromaManager:
         target_project = project or settings.default_project
 
         with self._lock:
+            # Check if project switched - if so, close old client to prevent leaks
+            if self._client is not None and self._current_project != target_project:
+                logger.info(f"Project switched from {self._current_project} to {target_project}, closing old ChromaDB client")
+                try:
+                    if hasattr(self._client, 'close'):
+                        self._client.close()
+                except Exception as e:
+                    logger.warning(f"Error closing ChromaDB client during switch: {e}")
+
+                self._client = None
+                self._collection = None
+
             # Check cache
             if (self._client is not None
                 and self._current_project == target_project):
@@ -82,18 +94,30 @@ class ChromaManager:
             return self._client, self._collection
 
     def reset(self) -> None:
-        """Reset cached client."""
+        """
+        Reset cached client.
+
+        Only clears state if client.close() succeeds to prevent resource leaks.
+        """
         with self._lock:
             # Explicitly close client if available
             if self._client is not None:
                 try:
                     if hasattr(self._client, 'close'):
                         self._client.close()
+                    # Only clear state if close succeeds
+                    self._client = None
+                    self._collection = None
+                    self._current_project = None
                 except Exception as e:
-                    logger.warning(f"Error closing ChromaDB client: {e}")
-            self._client = None
-            self._collection = None
-            self._current_project = None
+                    # If close fails, don't clear state - keeps reference for retry
+                    logger.error(f"Failed to close ChromaDB client, state preserved: {e}")
+                    raise  # Re-raise to signal failure
+            else:
+                # No client, just clear state
+                self._client = None
+                self._collection = None
+                self._current_project = None
 
     def get_collection_count(self, project: Optional[str] = None) -> int:
         """Get document count for a project."""
@@ -101,12 +125,27 @@ class ChromaManager:
         return collection.count()
 
     def delete_collection(self, project: str) -> bool:
-        """Delete a project's collection."""
+        """
+        Delete a project's collection.
+
+        Only resets cache if the deleted project is the current project.
+        """
         try:
+            # Check if this is the current project BEFORE deletion
+            is_current_project = False
+            with self._lock:
+                is_current_project = (self._current_project == project)
+
             client, _ = self.get_client(project)
             client.delete_collection(project)
-            # Only reset on success to maintain consistent state
-            self.reset()
+
+            # Only reset if we deleted the current project
+            if is_current_project:
+                self.reset()
+                logger.info(f"Deleted current project collection: {project}, cache reset")
+            else:
+                logger.info(f"Deleted other project collection: {project}, cache preserved")
+
             return True
         except Exception as e:
             logger.error(f"Failed to delete collection {project}: {e}")

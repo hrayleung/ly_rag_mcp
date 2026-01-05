@@ -9,7 +9,18 @@ from rag.project.manager import get_project_manager
 
 
 def register_admin_tools(mcp):
-    """Register admin MCP tools."""
+    """
+    Register all admin and management-related MCP tools.
+
+    This function registers the following tools:
+    - manage_project: Manage projects (create, list, switch, update, analyze)
+    - get_stats: Get system statistics (index or cache stats)
+    - list_documents: List indexed documents
+    - clear_index: Clear the index (destructive operation)
+
+    Args:
+        mcp: The FastMCP server instance to register tools with
+    """
     
     @mcp.tool()
     def manage_project(
@@ -57,35 +68,42 @@ def register_admin_tools(mcp):
             if action == "list":
                 project_info = pm.list_projects()
                 current = get_index_manager().current_project
-                
+
                 # Use the details from list_projects
                 return {
                     "projects": project_info.get("details", []),
                     "current": current,
                     "total": project_info.get("count", 0)
                 }
-            
-            elif action == "create":
-                if not project:
-                    return {"error": "project name required"}
+
+            # For all other actions, validate project name
+            if action in ("create", "switch", "update") and not project:
+                return {"error": f"project name required for '{action}' action"}
+
+            if project:
+                is_valid, err = pm.validate_name(project)
+                if not is_valid:
+                    return {"error": f"Invalid project name: {err}"}
+
+            if action == "create":
                 pm.create_project(project)
                 return {
                     "success": f"Created project: {project}",
                     "next_step": f"Add keywords: manage_project(action='update', project='{project}', keywords=['term1', 'term2'])"
                 }
-            
+
             elif action == "switch":
-                if not project:
-                    return {"error": "project name required"}
+                if not pm.project_exists(project):
+                    return {"error": f"Project '{project}' not found"}
                 get_index_manager().switch_project(project)
                 return {"success": f"Switched to: {project}"}
-            
+
             elif action == "update":
-                if not project:
-                    return {"error": "project name required"}
+                if not pm.project_exists(project):
+                    return {"error": f"Project '{project}' not found"}
                 if not keywords and not description:
                     return {"error": "Provide keywords and/or description"}
-                
+
                 pm.set_project_metadata(project, keywords or [], description)
                 return {
                     "success": f"Updated metadata for: {project}",

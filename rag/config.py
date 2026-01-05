@@ -222,6 +222,9 @@ class RAGSettings:
     rerank_min_results: int = 3
     hyde_trigger_min_results: int = 1
     hyde_trigger_score: float = 0.1
+    # HyDE model configuration: can be customized via environment variable or settings override
+    # Example models: "gpt-3.5-turbo" (default, fast), "gpt-4" (better quality, slower)
+    hyde_model: str = "gpt-3.5-turbo"
     hyde_timeout: float = 30.0
     hyde_max_retries: int = 2
     hyde_initial_backoff: float = 0.5
@@ -270,20 +273,55 @@ settings = RAGSettings()
 # Environment Validation
 # ---------------------------------------------------------------------------
 
-def require_openai_key() -> str:
-    """Get OpenAI API key or raise ValueError."""
-    key = os.getenv("OPENAI_API_KEY")
+def validate_api_key(key: str | None, key_name: str, min_length: int = 20) -> str:
+    """
+    Validate API key format and existence.
+
+    Args:
+        key: API key string or None
+        key_name: Name of the key for error messages
+        min_length: Minimum expected length for basic validation
+
+    Returns:
+        Validated key string
+
+    Raises:
+        ValueError: If key is missing or invalid
+    """
     if not key:
         raise ValueError(
-            "OPENAI_API_KEY not found in environment variables.\n"
-            "Please set it: export OPENAI_API_KEY='your-api-key'"
+            f"{key_name} not found in environment variables.\n"
+            f"Please set it: export {key_name}='your-api-key'"
         )
+
+    # Basic format validation
+    key = key.strip()
+    if len(key) < min_length:
+        raise ValueError(
+            f"{key_name} appears invalid (too short, < {min_length} characters).\n"
+            f"Please check your API key."
+        )
+
     return key
 
 
+def require_openai_key() -> str:
+    """Get and validate OpenAI API key or raise ValueError."""
+    key = os.getenv("OPENAI_API_KEY")
+    return validate_api_key(key, "OPENAI_API_KEY", min_length=20)
+
+
 def get_cohere_key() -> str | None:
-    """Get Cohere API key (optional)."""
-    return os.getenv("COHERE_API_KEY")
+    """Get and validate Cohere API key (optional)."""
+    key = os.getenv("COHERE_API_KEY")
+    if key:
+        # Validate if provided (warn but don't fail)
+        try:
+            return validate_api_key(key, "COHERE_API_KEY", min_length=20)
+        except ValueError as e:
+            logger.warning(f"Cohere API key validation failed: {e}")
+            return key
+    return None
 
 
 def get_github_token() -> str | None:
@@ -292,10 +330,69 @@ def get_github_token() -> str | None:
 
 
 def get_firecrawl_key() -> str | None:
-    """Get Firecrawl API key (optional)."""
-    return os.getenv("FIRECRAWL_API_KEY")
+    """Get and validate Firecrawl API key (optional)."""
+    key = os.getenv("FIRECRAWL_API_KEY")
+    if key:
+        # Validate if provided
+        try:
+            return validate_api_key(key, "FIRECRAWL_API_KEY", min_length=20)
+        except ValueError as e:
+            logger.warning(f"Firecrawl API key validation failed: {e}")
+            return key
+    return None
 
 
 def get_gemini_key() -> str | None:
-    """Get Gemini API key (optional)."""
-    return os.getenv("GEMINI_API_KEY")
+    """Get and validate Gemini API key (optional)."""
+    key = os.getenv("GEMINI_API_KEY")
+    if key:
+        # Validate if provided
+        try:
+            return validate_api_key(key, "GEMINI_API_KEY", min_length=20)
+        except ValueError as e:
+            logger.warning(f"Gemini API key validation failed: {e}")
+            return key
+    return None
+
+
+def validate_required_keys() -> dict[str, str]:
+    """
+    Validate all required API keys at startup.
+
+    Returns:
+        Dict with validation status
+
+    Raises:
+        ValueError: If required keys are missing/invalid
+    """
+    errors = {}
+
+    # Always require OpenAI key (used for embeddings + HyDE)
+    try:
+        require_openai_key()
+    except ValueError as e:
+        errors["OPENAI_API_KEY"] = str(e)
+
+    # Warn if embedding provider is Gemini but key is missing
+    if settings.embedding_provider == "gemini":
+        try:
+            gemini_key = get_gemini_key()
+            if not gemini_key:
+                errors["GEMINI_API_KEY"] = (
+                    "GEMINI_API_KEY required when EMBEDDING_PROVIDER=gemini.\n"
+                    "Please set it: export GEMINI_API_KEY='your-api-key'"
+                )
+        except Exception as e:
+            errors["GEMINI_API_KEY"] = str(e)
+
+    if errors:
+        error_msg = "API key validation failed:\n\n" + "\n".join(
+            f"- {k}: {v}" for k, v in errors.items()
+        )
+        raise ValueError(error_msg)
+
+    return {
+        "status": "ok",
+        "embedding_provider": settings.embedding_provider,
+        "openai_key": "validated"
+    }

@@ -34,10 +34,12 @@ class DummyMCP:
 def _register(monkeypatch, pm=None, im=None, mm=None, loader=None, processor=None, chunker=None, settings=None):
     if pm is None:
         pm = SimpleNamespace(
-            discover_projects=lambda: [],
+            discover_projects=lambda: ["p"],
             create_project=lambda project: {"ok": True},
             set_project_metadata=lambda project, keywords=None: None,
             update_project_paths=lambda project, paths: None,
+            project_exists=lambda name: name == "p",
+            validate_name=lambda name: (True, ""),
         )
     # normalize create_project to return dict without probing side effects
     if pm:
@@ -52,6 +54,8 @@ def _register(monkeypatch, pm=None, im=None, mm=None, loader=None, processor=Non
             create_project=_wrap_create,
             set_project_metadata=original_pm.set_project_metadata,
             update_project_paths=original_pm.update_project_paths,
+            project_exists=getattr(original_pm, "project_exists", lambda name: True),
+            validate_name=getattr(original_pm, "validate_name", lambda name: (True, "")),
         )
     if im is None:
         im = SimpleNamespace(
@@ -115,6 +119,8 @@ def test_index_documents_creates_project_and_indexes(monkeypatch, tmp_path):
         create_project=lambda project: created.setdefault("name", project),
         set_project_metadata=lambda project, keywords=None: None,
         update_project_paths=lambda project, paths: created.setdefault("paths", paths),
+        project_exists=lambda name: name == "p1",
+        validate_name=lambda name: (True, ""),
     )
     # create a real dir with a file so loader receives existing path
     dir_path = tmp_path / "d"
@@ -126,20 +132,12 @@ def test_index_documents_creates_project_and_indexes(monkeypatch, tmp_path):
     assert resp.get("success") is True
     assert created["name"] == "p1"
     assert "error" not in resp
-    assert resp.get("mode") in ("hybrid", "docs")
     assert resp.get("documents_processed") == 1
     assert resp.get("chunks_created") == 2
     assert resp.get("project") == "p1"
     assert created["paths"] == [str(dir_path)]
     assert resp["chunks_created"] >= resp["documents_processed"]
-    assert created["paths"] == [str(dir_path)]
-    assert resp["documents_processed"] == 1
-    assert resp["chunks_created"] == 2
-    assert resp["mode"] in ("hybrid", "docs")
-    assert resp["project"] == "p1"
     assert "detected_keywords" not in resp
-    assert resp["chunks_created"] >= resp["documents_processed"]
-    assert "error" not in resp
 
 
 def test_index_documents_returns_action_when_no_project(monkeypatch, tmp_path):

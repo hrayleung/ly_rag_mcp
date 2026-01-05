@@ -45,6 +45,14 @@ class BM25Manager:
 
         Returns:
             MD5 hash string
+
+        Note:
+            Bug M9 trade-off: Includes mtime_ns in hash to detect file edits.
+            This means `touch` or filesystem ops that change mtime without content
+            change will cause cache invalidation. This is intentional to detect
+            edits, but may cause unnecessary rebuilds in some workflows.
+            Future enhancement: Use content hash (SHA256) instead of mtime for
+            pure content-based invalidation.
         """
         if not nodes:
             return ""
@@ -56,6 +64,8 @@ class BM25Manager:
             content_parts.append(text)
 
             # Include file_path and mtime if available
+            # Bug M9: mtime_ns is included to detect file edits, but changes
+            # on `touch` or filesystem ops without content change
             metadata = getattr(node, 'metadata', {}) or {}
             file_path = metadata.get('file_path', '')
             mtime_ns = metadata.get('mtime_ns', 0)
@@ -69,39 +79,41 @@ class BM25Manager:
     def get_retriever(self, index, chroma_collection=None, project: Optional[str] = None):
         """
         Get or create BM25 retriever from index.
-        
+
         Args:
             index: LlamaIndex instance
             chroma_collection: Optional ChromaDB collection for fallback
-            
+
         Returns:
             BM25Retriever instance or None
         """
         cache_key = project or "default"
 
-        # Get nodes from docstore
-        nodes = list(index.docstore.docs.values())
-        current_count = len(nodes)
-
-        # Fallback to ChromaDB if docstore is empty
-        if current_count == 0 and chroma_collection:
-            nodes = self._load_nodes_from_chroma(chroma_collection)
-            current_count = len(nodes)
-
-        if current_count == 0:
-            logger.warning("No documents available for BM25")
-            return None
-
-        # Compute content hash for cache validation
-        current_hash = self._compute_content_hash(nodes)
-
         # Ensure cache structures are dictionaries (for backward compatibility with tests)
         if not isinstance(self._doc_count_at_build, dict):
-            self._doc_count_at_build = {}
+            with self._lock:
+                self._doc_count_at_build = {}
         if not isinstance(self._content_hash_at_build, dict):
-            self._content_hash_at_build = {}
+            with self._lock:
+                self._content_hash_at_build = {}
 
         with self._lock:
+            # Get nodes from docstore INSIDE lock to prevent TOCTOU
+            nodes = list(index.docstore.docs.values())
+            current_count = len(nodes)
+
+            # Fallback to ChromaDB if docstore is empty
+            if current_count == 0 and chroma_collection:
+                nodes = self._load_nodes_from_chroma(chroma_collection)
+                current_count = len(nodes)
+
+            if current_count == 0:
+                logger.warning("No documents available for BM25")
+                return None
+
+            # Compute content hash for cache validation INSIDE lock
+            current_hash = self._compute_content_hash(nodes)
+
             cached_retriever = self._retrievers.get(cache_key)
             cached_count = self._doc_count_at_build.get(cache_key, -1)
             cached_hash = self._content_hash_at_build.get(cache_key, "")
@@ -119,10 +131,10 @@ class BM25Manager:
                 and cached_count == current_count
                 and cached_hash != current_hash):
                 logger.info("BM25 cache invalidated: content changed but count same")
-            
+
             self._stats.bm25_builds += 1
             logger.info(f"Building BM25 retriever with {current_count} nodes")
-            
+
             start_time = time.time()
             retriever_cls = BM25Retriever
             if retriever_cls is None:

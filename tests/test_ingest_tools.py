@@ -90,7 +90,7 @@ def test_index_documents_returns_error_when_create_project_fails(tmp_path):
     fake_loader.load_directory.assert_not_called()
 
 
-def test_index_documents_happy_path_without_mode_param(tmp_path):
+def test_index_documents_happy_path(tmp_path):
     fake_pm = MagicMock()
     fake_pm.discover_projects.return_value = []
     fake_pm.create_project.return_value = {"success": True}
@@ -125,7 +125,8 @@ def test_index_documents_happy_path_without_mode_param(tmp_path):
 
     assert resp.get("success") is True
     assert resp.get("project") == "proj123"
-    assert "mode" in resp and resp["mode"] in {"docs", "hybrid"}
+    assert resp.get("documents_processed") == 1
+    assert resp.get("chunks_created") == 1
     fake_loader.load_directory.assert_called_once()
     fake_chunker.chunk_document.assert_called()
     fake_im.insert_nodes.assert_called()
@@ -150,3 +151,81 @@ def test_index_documents_requires_project_when_missing(tmp_path):
 
     assert resp.get("action_required") == "select_project"
     assert "options" in resp
+
+
+def test_file_size_checked_early(tmp_path):
+    """Bug L7: Verify file size is checked BEFORE reading file contents."""
+    from rag.ingestion.loader import DocumentLoader
+    from rag.config import settings
+
+    # Create a large file that exceeds the limit
+    large_file = tmp_path / "large.txt"
+    # Write data larger than max_file_size_bytes
+    large_file.write_text("a" * (settings.max_file_size_bytes + 1024))
+
+    loader = DocumentLoader()
+
+    # Validate should reject the file without reading its contents
+    is_valid, reason = loader.validate_file(large_file)
+
+    assert is_valid is False
+    assert reason == "file_too_large"
+
+
+def test_file_size_accepts_small_files(tmp_path):
+    """Bug L7: Verify files under size limit are accepted."""
+    from rag.ingestion.loader import DocumentLoader
+    from rag.config import settings
+
+    # Create a small file
+    small_file = tmp_path / "small.txt"
+    small_file.write_text("hello world")
+
+    loader = DocumentLoader()
+
+    # Validate should accept the file
+    is_valid, reason = loader.validate_file(small_file)
+
+    assert is_valid is True
+    assert reason == ""
+
+
+def test_add_text_sanitization():
+    """Bug L5: Verify add_text sanitizes input."""
+    from rag.tools.ingest import sanitize_text_input
+
+    # Test with leading/trailing whitespace
+    text, error = sanitize_text_input("   test content   ")
+    assert error is None
+    assert text == "test content"
+
+    # Test with only whitespace
+    text, error = sanitize_text_input("   \n\t   ")
+    assert error is not None
+    assert "empty" in error.lower()
+
+    # Test with text too long
+    text, error = sanitize_text_input("a" * 100001, max_length=100000)
+    assert error is not None
+    assert "too long" in error.lower()
+
+
+def test_sanitize_path_validation():
+    """Bug L5: Verify sanitize_path validates paths."""
+    from rag.tools.ingest import sanitize_path
+
+    # Test with whitespace
+    path, error = sanitize_path("  /tmp/test  ")
+    # Should fail because path doesn't exist, not because of whitespace
+    assert error is not None
+    assert "not found" in error.lower()
+
+    # Test with empty string
+    path, error = sanitize_path("")
+    assert error is not None
+    assert "empty" in error.lower()
+
+    # Test with None
+    path, error = sanitize_path(None)
+    assert error is not None
+

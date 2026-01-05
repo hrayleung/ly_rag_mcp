@@ -60,6 +60,8 @@ class ProjectMetadata:
     keywords: List[str] = field(default_factory=list)
     default_paths: List[str] = field(default_factory=list)
     last_indexed: Optional[str] = None
+    last_chat_time: Optional[str] = None
+    chat_turn_count: int = 0
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -67,7 +69,13 @@ class ProjectMetadata:
         # Only auto-set created_at if it's truly None, not just falsy
         if self.created_at is None:
             self.created_at = datetime.now().isoformat()
-        self.updated_at = datetime.now().isoformat()
+        # Only auto-set updated_at if it's truly None (preserves loaded values)
+        if self.updated_at is None:
+            self.updated_at = datetime.now().isoformat()
+
+        # Default display_name to name if not set
+        if not self.display_name:
+            self.display_name = self.name
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -78,6 +86,8 @@ class ProjectMetadata:
             "keywords": self.keywords,
             "default_paths": self.default_paths,
             "last_indexed": self.last_indexed,
+            "last_chat_time": self.last_chat_time,
+            "chat_turn_count": self.chat_turn_count,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -95,6 +105,8 @@ class ProjectMetadata:
             keywords=data.get("keywords", []),
             default_paths=data.get("default_paths", []),
             last_indexed=data.get("last_indexed"),
+            last_chat_time=data.get("last_chat_time"),
+            chat_turn_count=data.get("chat_turn_count", 0),
             created_at=data.get("created_at"),
             updated_at=data.get("updated_at"),
         )
@@ -102,7 +114,17 @@ class ProjectMetadata:
 
 @dataclass
 class RetrievalResult:
-    """Result from a retrieval operation."""
+    """
+    Result from a retrieval operation.
+
+    Attributes:
+        text: The retrieved text content
+        score: Relevance score (0.0-1.0) or None. None indicates the score is
+               unavailable or not applicable (e.g., for certain retriever types
+               or during error conditions). Code should handle both float and None.
+        metadata: Additional metadata about the result
+        node_id: Unique identifier for the node in the index
+    """
     text: str
     score: Optional[float] = None
     metadata: Dict[str, Any] = field(default_factory=dict)

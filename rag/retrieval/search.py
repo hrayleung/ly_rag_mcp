@@ -168,8 +168,8 @@ class SearchEngine:
         """
         Select appropriate search mode based on query analysis.
         """
-        # Respect explicit keyword/hybrid requests
-        if requested in (SearchMode.KEYWORD, SearchMode.HYBRID):
+        # Respect ALL explicit mode requests including SEMANTIC (Bug M4)
+        if requested in (SearchMode.KEYWORD, SearchMode.HYBRID, SearchMode.SEMANTIC):
             return requested
 
         # Analyze query for technical content
@@ -177,19 +177,21 @@ class SearchEngine:
         has_code_chars = bool(CODE_SNIPPET_RE.search(question))
 
         tokens = question.split()
-        if len(tokens) <= 1:
+        num_tokens = len(tokens)  # Cache len() call
+        if num_tokens <= 1:
             return SearchMode.KEYWORD
 
         if any("/" in t or "\\" in t or ("." in t and len(t) > 3) for t in tokens):
             logger.debug("Path-like token detected, using hybrid search")
             return SearchMode.HYBRID
 
+        # Cache repeated len(tokens) calls in ratio calculations
         uppercase_ratio = (
-            sum(1 for t in tokens if t.isupper() and len(t) > 1) / len(tokens)
+            sum(1 for t in tokens if t.isupper() and len(t) > 1) / num_tokens
             if tokens else 0
         )
         digit_ratio = (
-            sum(1 for t in tokens if any(c.isdigit() for c in t)) / len(tokens)
+            sum(1 for t in tokens if any(c.isdigit() for c in t)) / num_tokens
             if tokens else 0
         )
 
@@ -262,8 +264,8 @@ class SearchEngine:
             except Exception as e:
                 logger.warning(f"Reranking failed, using original results: {e}")
                 rerank_used = False
-            # Slice to top_k on failure
-            nodes = nodes[:min(top_k, len(nodes))]
+                # Slice to top_k on failure (reranker.rerank() already slices on success)
+                nodes = nodes[:min(top_k, len(nodes))]
         else:
             nodes = nodes[:min(top_k, len(nodes))]
 
@@ -290,10 +292,13 @@ class SearchEngine:
 
         chroma_manager = get_chroma_manager()
         _, collection = chroma_manager.get_client(project)
-        try:
+
+        # Validate collection before using for BM25 fallback
+        if collection is not None:
             bm25_retriever = self._bm25_manager.get_retriever(index, collection, project)
-        except TypeError:
-            bm25_retriever = self._bm25_manager.get_retriever(index, collection)
+        else:
+            logger.warning("ChromaDB collection unavailable, BM25 disabled")
+            bm25_retriever = None
 
         if bm25_retriever:
             bm25_retriever.similarity_top_k = top_k
@@ -313,10 +318,13 @@ class SearchEngine:
         """Get BM25-only retriever."""
         chroma_manager = get_chroma_manager()
         _, collection = chroma_manager.get_client(project)
-        try:
+
+        # Validate collection before using for BM25 fallback
+        if collection is not None:
             bm25_retriever = self._bm25_manager.get_retriever(index, collection, project)
-        except TypeError:
-            bm25_retriever = self._bm25_manager.get_retriever(index, collection)
+        else:
+            logger.warning("ChromaDB collection unavailable, BM25 disabled")
+            bm25_retriever = None
 
         if bm25_retriever:
             bm25_retriever.similarity_top_k = top_k

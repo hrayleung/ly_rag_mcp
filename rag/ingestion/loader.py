@@ -2,6 +2,7 @@
 Document loading functionality.
 """
 
+import os
 from pathlib import Path
 from typing import List, Optional, Set, Tuple
 from datetime import datetime
@@ -29,17 +30,23 @@ class DocumentLoader:
 
         Returns:
             Tuple of (is_valid, reason_if_invalid)
+
+        Security:
+            - Checks file size BEFORE attempting to read (Bug L7)
+            - Uses os.path.getsize() for faster rejection of oversized files
         """
         ext = path.suffix.lower()
 
         if ext not in ALLOWED_EXTENSIONS:
             return False, "unsupported_extension"
 
+        # Bug L7: Check file size BEFORE reading (fail-fast)
         try:
-            if path.stat().st_size > settings.max_file_size_bytes:
+            file_size = os.path.getsize(path)
+            if file_size > settings.max_file_size_bytes:
                 return False, "file_too_large"
         except OSError as e:
-            logger.warning(f"Unable to stat {path}: {e}")
+            logger.warning(f"Unable to get size of {path}: {e}")
             return False, "stat_error"
 
         return True, ""
@@ -173,7 +180,12 @@ class DocumentLoader:
             if file_path:
                 try:
                     stat = Path(file_path).stat()
-                    doc.metadata['mtime_ns'] = stat.st_mtime_ns
+                    # Bug M6 fix: Use fallback for Python < 3.3 or platforms without st_mtime_ns
+                    try:
+                        doc.metadata['mtime_ns'] = stat.st_mtime_ns
+                    except AttributeError:
+                        # Fallback for older Python versions or platforms
+                        doc.metadata['mtime_ns'] = int(stat.st_mtime * 1e9)
                 except Exception as e:
                     logger.debug(f"Failed to get mtime for {file_path}: {e}")
 

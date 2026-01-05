@@ -27,41 +27,43 @@ class ProjectManager:
     @property
     def current_project(self) -> str:
         """Get current active project."""
-        return self._current_project
+        with self._lock:
+            return self._current_project
     
     def discover_projects(self) -> List[str]:
         """
         Discover available projects in storage.
-        
+
         Returns:
             Sorted list of project names
         """
-        if not settings.storage_path.exists():
-            return []
-        
-        projects = []
-        for item in settings.storage_path.iterdir():
-            if not item.is_dir():
-                continue
-            if item.name.startswith('.'):
-                continue
-            if item.name == "chroma_db":
-                continue
+        with self._lock:
+            if not settings.storage_path.exists():
+                return []
 
-            project_path = item
-            has_metadata = (project_path / settings.project_metadata_filename).exists()
-            has_chroma = (project_path / "chroma_db").exists()
-            has_docstore = (project_path / "docstore.json").exists()
-            has_index_store = (project_path / "index_store.json").exists()
+            projects = []
+            for item in settings.storage_path.iterdir():
+                if not item.is_dir():
+                    continue
+                if item.name.startswith('.'):
+                    continue
+                if item.name == "chroma_db":
+                    continue
 
-            if has_metadata or has_chroma or has_docstore or has_index_store:
-                projects.append(item.name)
-            else:
-                logger.debug(
-                    "Skipping project candidate without markers: %s", project_path
-                )
+                project_path = item
+                has_metadata = (project_path / settings.project_metadata_filename).exists()
+                has_chroma = (project_path / "chroma_db").exists()
+                has_docstore = (project_path / "docstore.json").exists()
+                has_index_store = (project_path / "index_store.json").exists()
 
-        return sorted(projects)
+                if has_metadata or has_chroma or has_docstore or has_index_store:
+                    projects.append(item.name)
+                else:
+                    logger.debug(
+                        "Skipping project candidate without markers: %s", project_path
+                    )
+
+            return sorted(projects)
 
     def project_exists(self, name: str) -> bool:
         """Check if project exists."""
@@ -87,31 +89,44 @@ class ProjectManager:
     def create_project(self, name: str) -> Dict:
         """
         Create a new project.
-        
+
         Args:
             name: Project name
-            
+
         Returns:
             Result dict with success/error
         """
         # Sanitize name
         safe_name = "".join(c for c in name if c.isalnum() or c in ('_', '-'))
-        
+
         is_valid, error = self.validate_name(safe_name)
         if not is_valid:
             return {"error": error}
-        
-        # Check if exists
-        project_path = settings.storage_path / safe_name
-        if project_path.exists():
-            return {"error": f"Project '{safe_name}' already exists"}
-        
-        logger.info(f"Creating project: {safe_name}")
-        
-        # Initialize storage
-        get_chroma_manager().get_client(safe_name)
-        self._metadata.ensure_exists(safe_name)
-        
+
+        # Use lock to prevent TOCTOU race condition
+        with self._lock:
+            project_path = settings.storage_path / safe_name
+
+            # Check if exists (inside lock now)
+            if project_path.exists():
+                return {"error": f"Project '{safe_name}' already exists"}
+
+            logger.info(f"Creating project: {safe_name}")
+
+            try:
+                # Atomic directory creation
+                project_path.mkdir(exist_ok=False)
+
+                # Initialize storage
+                get_chroma_manager().get_client(safe_name)
+                self._metadata.ensure_exists(safe_name)
+
+            except FileExistsError:
+                return {"error": f"Project '{safe_name}' already exists"}
+            except Exception as e:
+                logger.error(f"Failed to create project: {e}", exc_info=True)
+                return {"error": f"Failed to create project: {e}"}
+
         return {
             "success": True,
             "message": f"Created project '{safe_name}'. Use switch_project('{safe_name}') to activate.",
@@ -121,10 +136,10 @@ class ProjectManager:
     def switch_project(self, name: str) -> Dict:
         """
         Switch to a different project.
-        
+
         Args:
             name: Project name
-            
+
         Returns:
             Result dict
         """
@@ -133,15 +148,21 @@ class ProjectManager:
                 "error": f"Project '{name}' not found",
                 "available": self.discover_projects()
             }
-        
+
         logger.info(f"Switching to project: {name}")
-        
-        self._current_project = name
-        
-        # Reset and reload managers
+
+        # Acquire lock before changing state
+        with self._lock:
+            self._current_project = name
+
+        # Bug M10 fix: Clear metadata cache when switching projects
+        # This prevents stale metadata after external project switches
+        self._metadata.clear_cache()
+
+        # Reset and reload managers (outside lock to avoid deadlock)
         index_manager = get_index_manager()
         index_manager.switch_project(name)
-        
+
         return {
             "success": True,
             "message": f"Switched to project '{name}'",
@@ -151,12 +172,12 @@ class ProjectManager:
     def list_projects(self) -> Dict:
         """
         List all projects with details.
-        
+
         Returns:
             Dict with project list and details
         """
         projects = self.discover_projects()
-        
+
         summaries = []
         for project in projects:
             metadata = self._metadata.load(project)
@@ -168,11 +189,15 @@ class ProjectManager:
                 "default_paths": metadata.default_paths or [],
                 "last_indexed": metadata.last_indexed,
             })
-        
+
+        # Use lock when reading current_project (Bug M12)
+        with self._lock:
+            current = self._current_project
+
         return {
             "projects": projects,
             "details": summaries,
-            "current_project": self._current_project,
+            "current_project": current,
             "count": len(projects)
         }
     
@@ -259,15 +284,16 @@ class ProjectManager:
     def infer_project(self, text: str) -> Optional[str]:
         """
         Infer best matching project from text.
-        
+
         Args:
             text: Query or description text
-            
+
         Returns:
             Project name or None
         """
         projects = self.discover_projects()
         if not projects:
+            logger.debug("infer_project: No projects discovered, returning None")
             return None
         
         text_lower = text.lower()
@@ -304,10 +330,17 @@ class ProjectManager:
             if name_lower != project_lower and name_lower in text:
                 score += 2
         
-        # Keyword matches
+        # Keyword matches - use word boundary for higher score (Bug M5)
         for keyword in (metadata.keywords or []):
-            if keyword and keyword.lower() in text:
-                score += 3
+            if not keyword:
+                continue
+            keyword_lower = keyword.lower()
+            # Exact word boundary match gets higher score
+            if re.search(rf'\b{re.escape(keyword_lower)}\b', text):
+                score += 5
+            # Partial substring match gets lower score
+            elif keyword_lower in text:
+                score += 2
         
         # Path matches
         for path_hint in (metadata.default_paths or []):
@@ -362,56 +395,68 @@ class ProjectManager:
         return score
     
     def choose_project(
-        self, 
-        question: str, 
+        self,
+        question: str,
         max_candidates: int = 3
     ) -> Dict:
         """
         Score and rank projects for a query.
-        
+
         Args:
             question: User query
             max_candidates: Maximum candidates to return
-            
+
         Returns:
             Dict with recommendations
         """
         if not question or not question.strip():
             return {"error": "question_required"}
-        
+
         projects = self.discover_projects()
         if not projects:
             return {"error": "no_projects", "message": "No projects available"}
-        
-        max_candidates = max(1, min(int(max_candidates), len(projects)))
+
+        # Validate and clamp max_candidates (Bug M13)
+        try:
+            max_candidates_int = int(max_candidates)
+            if max_candidates_int < 1:
+                return {"error": "invalid_max_candidates", "message": "max_candidates must be >= 1"}
+            max_candidates_int = min(max_candidates_int, len(projects))
+        except (ValueError, TypeError):
+            return {"error": "invalid_max_candidates", "message": "max_candidates must be a valid integer"}
+
         question_lower = question.lower()
-        
+
         # Parse directives
         includes, excludes = self._parse_directives(question, projects)
         inferred = self.infer_project(question)
-        
+
+        # Read current_project once to avoid race conditions
+        with self._lock:
+            current = self._current_project
+
         candidates = []
         for project in projects:
             if includes and project not in includes:
                 continue
             if project in excludes:
                 continue
-            
+
             metadata = self._metadata.load(project)
             score = self._score_project_match(project, metadata, question_lower)
-            
+
             reasons = []
             if project == inferred:
                 score += 5
                 reasons.append("name/keyword match")
-            if project == self._current_project:
+            if project == current:
                 score += 0.5
                 reasons.append("current workspace")
             if metadata.last_indexed:
                 score += 0.25
             if not metadata.keywords:
                 reasons.append("add keywords for better routing")
-            
+
             candidates.append({
                 "project": project,
                 "score": round(score, 3),
@@ -424,43 +469,48 @@ class ProjectManager:
         
         sorted_candidates = sorted(candidates, key=lambda c: c["score"], reverse=True)
         recommendation = sorted_candidates[0] if sorted_candidates else None
-        
+
         return {
             "question": question,
-            "current_project": self._current_project,
+            "current_project": current,
             "recommendation": recommendation["project"] if recommendation else None,
-            "candidates": sorted_candidates[:max_candidates],
+            "candidates": sorted_candidates[:max_candidates_int],
             "includes": list(includes),
             "excludes": list(excludes)
         }
     
     def _parse_directives(
-        self, 
-        question: str, 
+        self,
+        question: str,
         projects: List[str]
     ) -> Tuple[Set[str], Set[str]]:
         """Parse project inclusion/exclusion from query."""
         normalized = question.lower()
         normalized = normalized.replace("'", " ").replace('"', " ")
-        normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
-        
+        # Keep underscores and dashes in normalized text (Bug M11)
+        normalized = re.sub(r"[^a-z0-9\s_-]", " ", normalized)
+
         includes: Set[str] = set()
         excludes: Set[str] = set()
-        
+
         for project in projects:
             pl = project.lower()
             if pl not in normalized:
                 continue
-            
-            # Check exclusion patterns
-            if re.search(rf"(ignore|excluding|except|without|skip)\s.*\b{re.escape(pl)}\b", normalized):
+
+            # Check exclusion patterns (Bug M11: handle dashes/underscores in project names)
+            # Use lookaround for word boundaries that work with dashes/underscores
+            exclusion_pattern = rf"(ignore|excluding|except|without|skip).*?(?<!\w){re.escape(pl)}(?!\w)"
+            if re.search(exclusion_pattern, normalized):
                 excludes.add(project)
                 continue
-            
-            # Check inclusion patterns
-            if re.search(rf"(only|just|specifically|focus)\s+(the\s+)?{re.escape(pl)}", normalized):
+
+            # Check inclusion patterns (Bug M11: handle dashes/underscores in project names)
+            # Use lookaround for word boundaries that work with dashes/underscores
+            inclusion_pattern = rf"(only|just|specifically|focus).*?(?<!\w){re.escape(pl)}(?!\w)"
+            if re.search(inclusion_pattern, normalized):
                 includes.add(project)
-        
+
         includes -= excludes
         return includes, excludes
 

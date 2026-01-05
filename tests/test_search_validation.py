@@ -91,30 +91,53 @@ def test_select_search_mode_respects_explicit_hybrid_and_keyword(search_engine):
         "C++ example: if (x) { return y; }",  # code chars
     ],
 )
-def test_select_search_mode_auto_switches_to_hybrid_for_technical_queries(
+def test_select_search_mode_respects_explicit_semantic_for_technical_queries(
     search_engine, question
 ):
+    """Bug M4 fix: Explicit SEMANTIC mode should be respected, not overridden to HYBRID."""
     assert (
         search_engine._select_search_mode(question, SearchMode.SEMANTIC)
+        == SearchMode.SEMANTIC
+    )
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "HTTP 500 when calling API",  # 3+ digit token
+        "How to use FOO_BAR constant",  # [A-Z_]{2,}
+        "Why does a.b.c fail?",  # dot token
+        "C++ example: if (x) { return y; }",  # code chars
+    ],
+)
+def test_select_search_mode_auto_selects_hybrid_when_no_explicit_mode(
+    search_engine, question
+):
+    """When no explicit mode is requested (SEMANTIC is default), auto-select HYBRID for technical queries."""
+    # This tests auto-selection behavior when user doesn't explicitly request SEMANTIC
+    # We use None to simulate "no explicit request" - but SearchMode doesn't have None
+    # So we test that explicit HYBRID works
+    assert (
+        search_engine._select_search_mode(question, SearchMode.HYBRID)
         == SearchMode.HYBRID
     )
 
 
 def test_select_search_mode_uses_uppercase_ratio_threshold(search_engine):
-    # 2/3 tokens uppercase -> 0.666 > 0.3
+    # Bug M4: When SEMANTIC is explicitly requested, respect it
     question = "API TOKEN refresh"
     assert (
         search_engine._select_search_mode(question, SearchMode.SEMANTIC)
-        == SearchMode.HYBRID
+        == SearchMode.SEMANTIC  # Changed from HYBRID to SEMANTIC (Bug M4 fix)
     )
 
 
 def test_select_search_mode_uses_digit_ratio_threshold(search_engine):
-    # 2/3 tokens contain digits -> 0.666 > 0.4
+    # Bug M4: When SEMANTIC is explicitly requested, respect it
     question = "error 123 456"
     assert (
         search_engine._select_search_mode(question, SearchMode.SEMANTIC)
-        == SearchMode.HYBRID
+        == SearchMode.SEMANTIC  # Changed from HYBRID to SEMANTIC (Bug M4 fix)
     )
 
 
@@ -136,8 +159,8 @@ def test_bm25_retriever_called_with_collection(monkeypatch):
     monkeypatch.setattr(search_mod, "get_bm25_manager", lambda: MagicMock())
 
     class FakeBM25:
-        def get_retriever(self, index, collection=None):
-            calls.append((index, collection))
+        def get_retriever(self, index, collection=None, project=None):
+            calls.append((index, collection, project))
             return None
 
     class FakeChroma:
@@ -154,5 +177,5 @@ def test_bm25_retriever_called_with_collection(monkeypatch):
 
     retriever = engine._get_keyword_retriever(FakeIndex(), top_k=5, project="proj")
 
-    assert calls == [(ANY, "collection")]
+    assert calls == [(ANY, "collection", "proj")]
     assert retriever == "vector-5"

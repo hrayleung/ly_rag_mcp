@@ -19,6 +19,15 @@ from mcp.server.fastmcp import FastMCP
 # Allow nested event loops (needed for some readers)
 nest_asyncio.apply()
 
+# Validate API keys at startup
+from rag.config import validate_required_keys, logger
+try:
+    validate_required_keys()
+    logger.info("API key validation passed")
+except ValueError as e:
+    logger.error(f"API key validation failed: {e}")
+    raise
+
 # Initialize FastMCP server
 mcp = FastMCP("LlamaIndex RAG")
 

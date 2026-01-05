@@ -13,7 +13,7 @@ Local RAG system with OpenAI/Gemini embeddings, hybrid search (semantic + BM25),
 - **Multiple Embedding Providers**: OpenAI or Google Gemini
 - **Models**: OpenAI `text-embedding-3-large` or Gemini `text-embedding-004` + Cohere `rerank-v3.5`
 - **MCP Integration**: Works with standard MCP clients (Claude Desktop, Chatwise, Cherry Studio, etc.)
-- **68+ File Formats**: Code (49 ext), Docs (16 ext), Images (3 ext) via LlamaIndex readers
+- **35+ File Formats**: Code (16 ext), Docs (16 ext), Images (3 ext) via LlamaIndex readers
 - **Local Storage**: Per-project ChromaDB vector databases under `storage/{project}/`
 - **Optional Vue.js UI**: Real-time MCP monitoring at `/` when running api_server.py
 - **Thread-Safe**: All managers use singleton pattern with locks; cross-platform file locking for metadata
@@ -132,8 +132,8 @@ Show me the index statistics
 
 | Category | Formats |
 |----------|---------|
-| Code (49 extensions) | `.py`, `.js`, `.ts`, `.jsx`, `.tsx`, `.java`, `.cpp`, `.c`, `.h`, `.hpp`, `.cs`, `.go`, `.rs`, `.rb`, `.php`, `.swift`, `.kt`, `.scala`, `.r`, `.sh`, `.bash`, `.zsh`, `.sql`, `.yaml`, `.yml`, `.toml`, `.dockerfile`, `.makefile`, `.vue`, `.svelte`, `.astro`, `.html`, `.css` |
-| Documents (16 extensions) | `.txt`, `.pdf`, `.docx`, `.doc`, `.md`, `.epub`, `.ppt`, `.pptx`, `.pptm`, `.xls`, `.xlsx`, `.csv`, `.json`, `.xml`, `.ipynb`, `.hwp`, `.mbox`, `.rtf` |
+| Code (16 extensions) | `.py`, `.js`, `.ts`, `.jsx`, `.tsx`, `.java`, `.cpp`, `.c`, `.go`, `.rs`, `.sh`, `.sql`, `.yaml`, `.toml`, `.vue`, `.html`, `.css` |
+| Documents (16 extensions) | `.txt`, `.pdf`, `.docx`, `.md`, `.json`, `.xml`, `.csv`, `.ipynb`, `.epub`, `.doc`, `.ppt`, `.pptx`, `.pptm`, `.xls`, `.xlsx`, `.rtf` |
 | Images (3 extensions) | `.jpg`, `.jpeg`, `.png` |
 
 File size limit: 100MB per file
@@ -418,9 +418,9 @@ Set `COHERE_API_KEY` environment variable. Default model: `rerank-v3.5` (used in
 
 ### File Extensions Supported
 
-**Code (49 extensions):** `.py`, `.js`, `.ts`, `.jsx`, `.tsx`, `.java`, `.cpp`, `.c`, `.h`, `.hpp`, `.cs`, `.go`, `.rs`, `.rb`, `.php`, `.swift`, `.kt`, `.scala`, `.r`, `.sh`, `.bash`, `.zsh`, `.sql`, `.yaml`, `.yml`, `.toml`, `.dockerfile`, `.makefile`, `.vue`, `.svelte`, `.astro`, `.html`, `.css`
+**Code (16 extensions):** `.py`, `.js`, `.ts`, `.jsx`, `.tsx`, `.java`, `.cpp`, `.c`, `.go`, `.rs`, `.sh`, `.sql`, `.yaml`, `.toml`, `.vue`, `.html`, `.css`
 
-**Documents (16 extensions):** `.txt`, `.pdf`, `.docx`, `.doc`, `.md`, `.epub`, `.ppt`, `.pptx`, `.pptm`, `.xls`, `.xlsx`, `.csv`, `.json`, `.xml`, `.ipynb`, `.hwp`, `.mbox`, `.rtf`
+**Documents (16 extensions):** `.txt`, `.pdf`, `.docx`, `.md`, `.json`, `.xml`, `.csv`, `.ipynb`, `.epub`, `.doc`, `.ppt`, `.pptx`, `.pptm`, `.xls`, `.xlsx`, `.rtf`
 
 **Images (3 extensions):** `.jpg`, `.jpeg`, `.png`
 
@@ -511,7 +511,7 @@ ly_rag_mcp/
 
 **Dataclasses:**
 - `FileMetadata`: `path`, `mtime_ns`, `size`
-- `ProjectMetadata`: `name`, `display_name`, `description`, `keywords[]`, `default_paths[]`, `last_indexed`, `created_at`, `updated_at`, `last_chat_time`, `chat_turn_count`
+- `ProjectMetadata`: `name`, `display_name`, `description`, `keywords[]`, `default_paths[]`, `last_indexed`, `created_at`, `updated_at`
 - `RetrievalResult`: `text`, `score`, `metadata`, `node_id`, `preview`
 - `SearchResult`: `results[]`, `query`, `search_mode`, `reranked`, `used_hyde`, `generated_query`, `project`, `total`
 - `IngestResult`: `success`, `message`, `documents_processed`, `chunks_created`, `skipped_unsupported`, `skipped_oversize`, `skipped_other`, `error`

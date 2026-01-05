@@ -104,3 +104,35 @@ def test_thread_safety_of_get_index(monkeypatch, tmp_path):
 
     assert not errors
     assert mgr.stats.index_loads >= 1
+
+
+def test_get_retriever_log_messages(monkeypatch, tmp_path, caplog):
+    """Test that get_retriever logs accurate warnings with original values."""
+    import logging
+
+    chroma = DummyChroma()
+    monkeypatch.setattr(index_mod, "get_chroma_manager", lambda: chroma)
+    monkeypatch.setattr(index_mod.settings, "storage_path", tmp_path)
+    monkeypatch.setattr(index_mod.settings, "default_project", "p")
+    monkeypatch.setattr(index_mod.settings, "min_top_k", 2)
+    monkeypatch.setattr(index_mod.settings, "max_top_k", 20)
+
+    mgr = index_mod.IndexManager()
+
+    # Test log message when top_k too small
+    with caplog.at_level(logging.WARNING):
+        retr = mgr.get_retriever(project="p", similarity_top_k=1)
+        assert retr == ("retriever", 2)  # Clamped to min_top_k
+
+    # Check that warning shows original value (1), not clamped value (2)
+    assert any("top_k too small (1)" in record.message for record in caplog.records)
+    caplog.clear()
+
+    # Test log message when top_k too large
+    with caplog.at_level(logging.WARNING):
+        retr = mgr.get_retriever(project="p", similarity_top_k=50)
+        assert retr == ("retriever", 20)  # Clamped to max_top_k
+
+    # Check that warning shows original value (50), not clamped value (20)
+    assert any("top_k too large (50)" in record.message for record in caplog.records)
+

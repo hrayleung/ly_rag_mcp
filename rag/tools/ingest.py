@@ -8,7 +8,7 @@ from pathlib import Path
 
 from llama_index.core import Document, Settings
 
-from rag.config import settings, logger, CODE_INDICATOR_FILES, CODE_INDICATOR_DIRS
+from rag.config import settings, logger
 from rag.storage.index import get_index_manager
 from rag.project.manager import get_project_manager
 from rag.project.metadata import get_metadata_manager
@@ -23,8 +23,91 @@ except ImportError:
     FIRECRAWL_AVAILABLE = False
 
 
+def sanitize_path(path: str) -> tuple[Path | None, str | None]:
+    """
+    Sanitize and validate file path input.
+
+    Args:
+        path: User-provided path string
+
+    Returns:
+        Tuple of (validated_path or None, error_message or None)
+
+    Security:
+        - Validates path exists
+        - Checks path is within allowed directories (no traversal)
+        - Resolves symbolic links
+    """
+    if not path or not isinstance(path, str):
+        return None, "Path must be a non-empty string"
+
+    # Strip whitespace
+    path = path.strip()
+
+    if not path:
+        return None, "Path cannot be empty or whitespace only"
+
+    try:
+        # Resolve to absolute path (follows symlinks)
+        resolved = Path(path).resolve()
+
+        # Check if exists
+        if not resolved.exists():
+            return None, f"Path not found: {path}"
+
+        # For directories, ensure we can access it
+        if resolved.is_dir():
+            # Basic check to prevent obvious traversal attacks
+            # Real path validation should be done with proper permissions
+            try:
+                resolved.iterdir()
+            except PermissionError:
+                return None, f"Permission denied: {path}"
+
+        return resolved, None
+    except Exception as e:
+        return None, f"Invalid path: {str(e)}"
+
+
+def sanitize_text_input(text: str, max_length: int = 100000) -> tuple[str | None, str | None]:
+    """
+    Sanitize text input (e.g., for add_text).
+
+    Args:
+        text: User-provided text
+        max_length: Maximum allowed length
+
+    Returns:
+        Tuple of (sanitized_text or None, error_message or None)
+    """
+    if not text or not isinstance(text, str):
+        return None, "Text must be a non-empty string"
+
+    # Strip leading/trailing whitespace
+    text = text.strip()
+
+    if not text:
+        return None, "Text cannot be empty or whitespace only"
+
+    if len(text) > max_length:
+        return None, f"Text too long (max {max_length} characters)"
+
+    return text, None
+
+
 def register_ingest_tools(mcp):
-    """Register ingestion MCP tools."""
+    """
+    Register all ingestion-related MCP tools.
+
+    This function registers the following tools:
+    - index_documents: Index documents or code from a directory
+    - add_text: Add raw text to the index
+    - inspect_directory: Analyze directory contents before indexing
+    - crawl_website: Crawl and index a website using Firecrawl
+
+    Args:
+        mcp: The FastMCP server instance to register tools with
+    """
 
     @mcp.tool()
     def index_documents(
@@ -43,9 +126,9 @@ def register_ingest_tools(mcp):
             index_documents(path='/path/to/repo', project='backend')
         """
         try:
-            dir_path = Path(path)
-            if not dir_path.exists():
-                return {"error": f"Path not found: {path}"}
+            dir_path, error = sanitize_path(path)
+            if error:
+                return {"error": error}
             if not dir_path.is_dir():
                 return {"error": f"Not a directory: {path}"}
             
@@ -85,21 +168,13 @@ def register_ingest_tools(mcp):
 
             get_index_manager().switch_project(project)
 
-            # Detect mode (removed; always infer based on content during processing)
-            has_code_markers = any(
-                (dir_path / f).exists() for f in CODE_INDICATOR_FILES
-            ) or any(
-                (dir_path / d).exists() for d in CODE_INDICATOR_DIRS
-            )
-            detected_mode = "hybrid" if has_code_markers else "docs"
-
             # Create per-call instances for thread safety
             loader = DocumentLoader()
             processor = DocumentProcessor()
             chunker = DocumentChunker()
 
             # Load documents
-            logger.info(f"Loading documents from {path} (mode: {detected_mode})")
+            logger.info(f"Loading documents from {path}")
             documents, skip_stats = loader.load_directory(
                 directory=dir_path
             )
@@ -130,12 +205,11 @@ def register_ingest_tools(mcp):
                 "success": True,
                 "project": project,
                 "documents_processed": len(documents),
-                "chunks_created": len(all_nodes),
-                "mode": detected_mode
+                "chunks_created": len(all_nodes)
             }
             
         except Exception as e:
-            logger.error(f"Indexing error: {e}", exc_info=True)
+            logger.error(f"Indexing error: {e}", exc_info=True, extra={"project": project, "path": str(dir_path) if 'dir_path' in locals() else "N/A"})
             return {"error": str(e)}
     
     @mcp.tool()
@@ -149,48 +223,64 @@ def register_ingest_tools(mcp):
             project: Target project (uses current if not specified)
         """
         try:
-            if not text or not text.strip():
-                return {"error": "Text cannot be empty"}
+            sanitized_text, error = sanitize_text_input(text)
+            if error:
+                return {"error": error}
+
+            pm = get_project_manager()
+            index_manager = get_index_manager()
+
+            # Resolve and validate project
+            target_project = project or index_manager.current_project
+            is_valid, err = pm.validate_name(target_project)
+            if not is_valid:
+                return {"error": f"Invalid project name: {err}"}
+
+            if not pm.project_exists(target_project):
+                return {"error": f"Project '{target_project}' not found. Create it first using index_documents or manage_project."}
 
             # Create per-call processor instance for thread safety
             processor = DocumentProcessor()
             doc_metadata = processor.sanitize_metadata(metadata or {})
             doc_metadata['added_via'] = 'mcp_tool'
             doc_metadata['added_at'] = datetime.now().isoformat()
-            
-            document = Document(text=text, metadata=doc_metadata)
+
+            document = Document(text=sanitized_text, metadata=doc_metadata)
             document = processor.inject_context(document)
-            
+
             index_manager = get_index_manager()
             index = index_manager.get_index(project)
-            
+
             nodes = Settings.text_splitter.get_nodes_from_documents([document])
             index.insert_nodes(nodes)
             index_manager.persist(project)
-            
+
             target_project = project or index_manager.current_project
             get_metadata_manager().record_index_activity(target_project, "inline_text")
-            
+
             return {
                 "success": True,
                 "chunks_created": len(nodes),
-                "text_length": len(text)
+                "text_length": len(sanitized_text)
             }
         except Exception as e:
+            target_project = project or index_manager.current_project if 'index_manager' in locals() else None
+            text_len = len(sanitized_text) if 'sanitized_text' in locals() else (len(text) if text else 0)
+            logger.error(f"add_text failed: {e}", exc_info=True, extra={"project": target_project, "text_length": text_len})
             return {"error": str(e)}
-    
+
     @mcp.tool()
     def inspect_directory(path: str) -> dict:
         """
         Analyze directory contents before indexing.
-        
+
         Args:
             path: Directory path to inspect
         """
         try:
-            dir_path = Path(path)
-            if not dir_path.exists():
-                return {"error": f"Path not found: {path}"}
+            dir_path, error = sanitize_path(path)
+            if error:
+                return {"error": error}
             
             stats = {
                 "code_files": 0,
@@ -214,11 +304,12 @@ def register_ingest_tools(mcp):
             stats["total_size_mb"] = round(stats["total_size_mb"], 2)
 
             return stats
-            
+
         except Exception as e:
+            logger.error(f"inspect_directory failed: {e}", exc_info=True, extra={"path": path})
             return {"error": str(e)}
 
-    
+
     @mcp.tool()
     def crawl_website(url: str, max_pages: int = 10, project: str = None) -> dict:
         """
@@ -236,8 +327,26 @@ def register_ingest_tools(mcp):
         if not api_key:
             return {"error": "FIRECRAWL_API_KEY not set"}
 
+        # Validate URL
+        if not url or not isinstance(url, str):
+            return {"error": "Invalid URL: URL must be a non-empty string"}
+        
+        url = url.strip()
+        if not url:
+            return {"error": "Invalid URL: URL cannot be empty or whitespace only"}
+        
+        if not url.startswith(('http://', 'https://')):
+            return {"error": "Invalid URL: URL must start with http:// or https://"}
+
+        # Validate max_pages
+        if not isinstance(max_pages, int):
+            return {"error": "max_pages must be an integer"}
+        
         if max_pages <= 0:
             return {"error": "max_pages must be positive"}
+        
+        if max_pages > 1000:
+            return {"error": "max_pages cannot exceed 1000"}
 
         try:
             from firecrawl import Firecrawl
@@ -290,5 +399,5 @@ def register_ingest_tools(mcp):
                 "url": url
             }
         except Exception as e:
-            logger.error(f"Crawl error: {e}", exc_info=True)
+            logger.error(f"Crawl error: {e}", exc_info=True, extra={"url": url, "project": target_project or "current"})
             return {"error": str(e)}

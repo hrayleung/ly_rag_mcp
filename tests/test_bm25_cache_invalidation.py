@@ -160,20 +160,7 @@ def test_cache_invalidation_logs_on_hash_change(monkeypatch, caplog):
     assert any("cache invalidated" in rec.message for rec in caplog.records)
 
 
-def test_cache_reset_clears_hash():
-    """Test that reset clears content hash."""
-    manager = BM25Manager()
-
-    # Set some state
-    manager._doc_count_at_build = 10
-    manager._content_hash_at_build = "abcd1234"
-
-    # Reset
-    manager.reset()
-
-    # Verify cleared
-    assert manager._doc_count_at_build == 0
-    assert manager._content_hash_at_build == ""
+[["test_cache_reset_clears_hash()"]]
 
 
 def test_empty_nodes_hash():
@@ -231,5 +218,198 @@ def test_hash_includes_file_metadata():
     assert hash1 == hash3
 
 
+def test_bm25_cache_thread_safe():
+    """
+    Test BM25 cache validation is thread-safe under concurrent access.
+
+    This test verifies Bug H3 fix: nodes access and hash computation
+    now happen INSIDE the lock, preventing TOCTOU vulnerability.
+    """
+    import threading
+    import time
+
+    manager = BM25Manager()
+
+    # Create TextNode objects
+    node1 = TextNode(
+        text="Thread-safe test content",
+        id_="node1",
+        metadata={"file_path": "/test/file1.py", "mtime_ns": 12345}
+    )
+
+    class FakeDocstore:
+        def __init__(self, docs):
+            self.docs = docs
+
+    class FakeIndex:
+        def __init__(self, docs):
+            self.docstore = FakeDocstore(docs)
+
+    # Stub BM25 retriever build to avoid heavy dependency
+    def fake_from_defaults(nodes, similarity_top_k, stemmer, language):
+        return "bm25"
+
+    import rag.retrieval.bm25 as bm25_mod
+    original_retriever = bm25_mod.BM25Retriever
+    bm25_mod.BM25Retriever = SimpleNamespace(from_defaults=fake_from_defaults)
+
+    try:
+        index = FakeIndex({"1": node1})
+
+        # Track successful retrievals
+        results = []
+        errors = []
+
+        def concurrent_get():
+            try:
+                for _ in range(10):
+                    retriever = manager.get_retriever(index)
+                    results.append(retriever)
+                    time.sleep(0.001)  # Small delay to increase race likelihood
+            except Exception as e:
+                errors.append(e)
+
+        # Launch multiple threads
+        threads = []
+        for _ in range(5):
+            t = threading.Thread(target=concurrent_get)
+            threads.append(t)
+            t.start()
+
+        # Wait for completion
+        for t in threads:
+            t.join()
+
+        # Verify no errors occurred
+        assert len(errors) == 0, f"Thread-safe test failed with errors: {errors}"
+
+        # Verify all retrievals succeeded
+        assert len(results) == 50  # 5 threads * 10 iterations
+        assert all(r == "bm25" for r in results)
+
+        # Verify cache was used (should have built once, then cached)
+        # Note: In concurrent scenario, might build multiple times due to races
+        # but should be much less than total requests
+        assert manager._stats.bm25_builds >= 1
+        assert manager._stats.bm25_cache_hits > 0
+
+    finally:
+        # Restore original
+        bm25_mod.BM25Retriever = original_retriever
+
+
+def test_cache_reset_clears_hash():
+    """Test that reset() clears all cached state including hashes."""
+    manager = BM25Manager()
+
+    # Create TextNode objects
+    node1 = TextNode(
+        text="Test content",
+        id_="node1",
+        metadata={"file_path": "/test/file1.py", "mtime_ns": 12345}
+    )
+
+    class FakeDocstore:
+        def __init__(self, docs):
+            self.docs = docs
+
+    class FakeIndex:
+        def __init__(self, docs):
+            self.docstore = FakeDocstore(docs)
+
+    # Stub BM25 retriever build
+    def fake_from_defaults(nodes, similarity_top_k, stemmer, language):
+        return "bm25"
+
+    import rag.retrieval.bm25 as bm25_mod
+    original_retriever = bm25_mod.BM25Retriever
+    bm25_mod.BM25Retriever = SimpleNamespace(from_defaults=fake_from_defaults)
+
+    try:
+        index = FakeIndex({"1": node1})
+
+        # First call builds and caches
+        first = manager.get_retriever(index, project="test_proj")
+        assert first == "bm25"
+        assert manager._stats.bm25_builds == 1
+
+        # Verify cache state
+        assert "test_proj" in manager._retrievers
+        assert "test_proj" in manager._doc_count_at_build
+        assert "test_proj" in manager._content_hash_at_build
+
+        # Reset cache
+        manager.reset()
+
+        # Verify all state cleared
+        assert len(manager._retrievers) == 0
+        assert len(manager._doc_count_at_build) == 0
+        assert len(manager._content_hash_at_build) == 0
+
+        # Next call should rebuild
+        second = manager.get_retriever(index, project="test_proj")
+        assert second == "bm25"
+        assert manager._stats.bm25_builds == 2  # Rebuilt after reset
+
+    finally:
+        # Restore original
+        bm25_mod.BM25Retriever = original_retriever
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+def test_mtime_ns_fallback():
+    """
+    Test mtime_ns platform compatibility with fallback (Bug M6).
+    
+    Verifies that the DocumentLoader properly handles platforms
+    or Python versions that don't support st_mtime_ns.
+    """
+    from pathlib import Path
+    from rag.ingestion.loader import DocumentLoader
+    from unittest.mock import Mock, patch
+    import tempfile
+
+    loader = DocumentLoader()
+
+    # Create a temporary test file
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+        f.write("test content")
+        temp_path = Path(f.name)
+
+    try:
+        # Test 1: Normal platform with st_mtime_ns
+        mock_stat = Mock()
+        mock_stat.st_mtime_ns = 1234567890000000000
+        mock_stat.st_mtime = 1234567890.0
+
+        with patch.object(Path, 'stat', return_value=mock_stat):
+            from llama_index.core import Document
+            documents = loader.load_files([temp_path])
+            
+            assert len(documents) > 0
+            # Should have mtime_ns from st_mtime_ns
+            if 'file_path' in documents[0].metadata:
+                assert 'mtime_ns' in documents[0].metadata
+                assert documents[0].metadata['mtime_ns'] == 1234567890000000000
+
+        # Test 2: Platform without st_mtime_ns (old Python)
+        mock_stat_no_ns = Mock()
+        mock_stat_no_ns.st_mtime = 1234567890.0
+        # Simulate AttributeError when accessing st_mtime_ns
+        del mock_stat_no_ns.st_mtime_ns
+
+        with patch.object(Path, 'stat', return_value=mock_stat_no_ns):
+            documents = loader.load_files([temp_path])
+            
+            assert len(documents) > 0
+            # Should have mtime_ns from fallback calculation
+            if 'file_path' in documents[0].metadata:
+                assert 'mtime_ns' in documents[0].metadata
+                # Should be calculated from st_mtime * 1e9
+                assert documents[0].metadata['mtime_ns'] == int(1234567890.0 * 1e9)
+
+    finally:
+        # Cleanup
+        temp_path.unlink(missing_ok=True)
