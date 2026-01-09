@@ -229,6 +229,10 @@ class RAGSettings:
     hyde_max_retries: int = 2
     hyde_initial_backoff: float = 0.5
 
+    # Web crawling
+    firecrawl_timeout: float = 30.0
+    firecrawl_max_pages: int = 1000
+
     # API Server
     request_buffer_size: int = 200
     log_buffer_size: int = 400

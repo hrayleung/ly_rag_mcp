@@ -248,7 +248,6 @@ def register_ingest_tools(mcp):
             document = Document(text=sanitized_text, metadata=doc_metadata)
             document = processor.inject_context(document)
 
-            index_manager = get_index_manager()
             index = index_manager.get_index(project)
 
             nodes = Settings.text_splitter.get_nodes_from_documents([document])
@@ -345,9 +344,10 @@ def register_ingest_tools(mcp):
         if max_pages <= 0:
             return {"error": "max_pages must be positive"}
         
-        if max_pages > 1000:
-            return {"error": "max_pages cannot exceed 1000"}
+        if max_pages > settings.firecrawl_max_pages:
+            return {"error": f"max_pages cannot exceed {settings.firecrawl_max_pages}"}
 
+        target_project = None  # Define before try block to avoid NameError in except
         try:
             from firecrawl import Firecrawl
             from firecrawl.types import ScrapeOptions
@@ -361,7 +361,7 @@ def register_ingest_tools(mcp):
                 url,
                 limit=max_pages,
                 scrape_options=ScrapeOptions(formats=['markdown']),
-                timeout=30  # 30 second timeout
+                timeout=int(settings.firecrawl_timeout)
             )
 
             # Validate result.data exists before accessing

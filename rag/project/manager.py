@@ -273,12 +273,17 @@ class ProjectManager:
                 None
             )
 
-        # Switch if needed - atomic with lock
+        # Switch if needed - update state atomically, load index outside lock to avoid deadlock
+        needs_switch = False
         with self._lock:
             if project != self._current_project:
-                get_index_manager().get_index(project)
                 self._current_project = project
-        
+                needs_switch = True
+
+        # Load index outside lock to prevent lock order deadlock with IndexManager
+        if needs_switch:
+            get_index_manager().get_index(project)
+
         return None, project
     
     def infer_project(self, text: str) -> Optional[str]:

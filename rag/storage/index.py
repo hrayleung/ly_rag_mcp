@@ -4,6 +4,7 @@ LlamaIndex storage management.
 Handles index creation, loading, and persistence.
 """
 
+import sys
 import threading
 import os
 from pathlib import Path
@@ -26,12 +27,27 @@ from rag.utils.timing import log_timing
 
 
 def _fsync_directory(path: Path) -> None:
-    """fsync a directory, ensuring the fd is closed even on error."""
-    dir_fd = os.open(str(path), os.O_RDONLY)
+    """
+    fsync a directory, ensuring the fd is closed even on error.
+
+    Note:
+        On Windows, directory fsync is not supported in the same way as Unix.
+        This function gracefully handles platform-specific limitations.
+    """
+    # Windows doesn't support opening directories with O_RDONLY for fsync
+    if sys.platform == "win32":
+        logger.debug(f"Skipping directory fsync on Windows: {path}")
+        return
+
     try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
+        dir_fd = os.open(str(path), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError as e:
+        # Some filesystems (e.g., network mounts) may not support directory fsync
+        logger.debug(f"Directory fsync not supported for {path}: {e}")
 
 
 def _fsync_json_files(path: Path) -> None:
