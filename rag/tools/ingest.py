@@ -361,7 +361,8 @@ def register_ingest_tools(mcp):
                 url,
                 limit=max_pages,
                 scrape_options=ScrapeOptions(formats=['markdown']),
-                timeout=int(settings.firecrawl_timeout)
+                timeout=int(settings.firecrawl_job_timeout),  # Job-level timeout
+                request_timeout=settings.firecrawl_request_timeout  # Per-request timeout
             )
 
             # Validate result.data exists before accessing

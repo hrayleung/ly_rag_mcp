@@ -230,7 +230,8 @@ class RAGSettings:
     hyde_initial_backoff: float = 0.5
 
     # Web crawling
-    firecrawl_timeout: float = 30.0
+    firecrawl_job_timeout: float = 300.0  # Max time (seconds) to wait for entire crawl job
+    firecrawl_request_timeout: float = 30.0  # Timeout for individual HTTP requests
     firecrawl_max_pages: int = 1000
 
     # API Server
