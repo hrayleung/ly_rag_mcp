@@ -107,7 +107,7 @@ def test_get_stats_cache_and_index(monkeypatch):
     settings = SimpleNamespace(storage_path=SimpleNamespace(exists=lambda: True), embedding_provider="openai", embedding_model="text-embedding-3-large")
     im = SimpleNamespace(
         current_project="p",
-        stats=SimpleNamespace(index_loads=1, index_cache_hits=2, cache_hit_rate=0.4),
+        stats=SimpleNamespace(index_loads=1, index_cache_hits=2, get_hit_rate=lambda cat: 66.7),
     )
     cm = SimpleNamespace(get_collection_count=lambda project=None: 7)
     pm = SimpleNamespace()
@@ -115,6 +115,7 @@ def test_get_stats_cache_and_index(monkeypatch):
 
     cache_resp = mcp.tools["get_stats"]("cache")
     assert cache_resp["index_loads"] == 1
+    assert cache_resp["cache_hit_rate"] == "66.7%"
 
     index_resp = mcp.tools["get_stats"]("index")
     assert index_resp["documents"] == 7

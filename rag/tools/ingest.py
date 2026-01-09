@@ -248,13 +248,13 @@ def register_ingest_tools(mcp):
             document = Document(text=sanitized_text, metadata=doc_metadata)
             document = processor.inject_context(document)
 
-            index = index_manager.get_index(project)
+            # Use target_project consistently to avoid mismatch
+            index = index_manager.get_index(target_project)
 
             nodes = Settings.text_splitter.get_nodes_from_documents([document])
             index.insert_nodes(nodes)
-            index_manager.persist(project)
+            index_manager.persist(target_project)
 
-            target_project = project or index_manager.current_project
             get_metadata_manager().record_index_activity(target_project, "inline_text")
 
             return {

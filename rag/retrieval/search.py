@@ -29,9 +29,18 @@ class SearchEngine:
     """
 
     def __init__(self):
-        self._index_manager = get_index_manager()
-        self._reranker_manager = get_reranker_manager()
-        self._bm25_manager = get_bm25_manager()
+        self._index_manager = None
+        self._reranker_manager = None
+        self._bm25_manager = None
+
+    def _ensure_managers(self):
+        """Lazily initialize managers to avoid import-time failures."""
+        if self._index_manager is None:
+            self._index_manager = get_index_manager()
+        if self._reranker_manager is None:
+            self._reranker_manager = get_reranker_manager()
+        if self._bm25_manager is None:
+            self._bm25_manager = get_bm25_manager()
 
     def search(
         self,
@@ -56,6 +65,9 @@ class SearchEngine:
         Returns:
             SearchResult containing retrieved documents
         """
+        # Ensure managers are initialized
+        self._ensure_managers()
+
         # Validate inputs
         question = self._validate_query(question)
         top_k = self._validate_top_k(similarity_top_k)
@@ -288,6 +300,7 @@ class SearchEngine:
 
     def _get_hybrid_retriever(self, index, top_k: int, project: str):
         """Get hybrid retriever combining vector and BM25."""
+        self._ensure_managers()
         vector_retriever = index.as_retriever(similarity_top_k=top_k)
 
         chroma_manager = get_chroma_manager()
@@ -316,6 +329,7 @@ class SearchEngine:
 
     def _get_keyword_retriever(self, index, top_k: int, project: str):
         """Get BM25-only retriever."""
+        self._ensure_managers()
         chroma_manager = get_chroma_manager()
         _, collection = chroma_manager.get_client(project)
 

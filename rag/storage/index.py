@@ -87,7 +87,8 @@ class IndexManager:
     @property
     def current_project(self) -> str:
         """Get current active project."""
-        return self._current_project or settings.default_project
+        with self._lock:
+            return self._current_project or settings.default_project
     
     def _configure_llama_settings(self) -> None:
         """Configure LlamaIndex global settings."""

@@ -130,26 +130,34 @@ class ChromaManager:
 
         Only resets cache if the deleted project is the current project.
         """
-        try:
-            # Check if this is the current project BEFORE deletion
-            is_current_project = False
-            with self._lock:
+        with self._lock:
+            try:
                 is_current_project = (self._current_project == project)
 
-            client, _ = self.get_client(project)
-            client.delete_collection(project)
+                # Get client for the project
+                client, _ = self.get_client(project)
+                client.delete_collection(project)
 
-            # Only reset if we deleted the current project
-            if is_current_project:
-                self.reset()
-                logger.info(f"Deleted current project collection: {project}, cache reset")
-            else:
-                logger.info(f"Deleted other project collection: {project}, cache preserved")
+                # Only reset if we deleted the current project
+                if is_current_project:
+                    # Clear state directly since we're in lock
+                    if self._client is not None:
+                        try:
+                            if hasattr(self._client, 'close'):
+                                self._client.close()
+                        except Exception as e:
+                            logger.warning(f"Error closing ChromaDB client: {e}")
+                    self._client = None
+                    self._collection = None
+                    self._current_project = None
+                    logger.info(f"Deleted current project collection: {project}, cache reset")
+                else:
+                    logger.info(f"Deleted other project collection: {project}, cache preserved")
 
-            return True
-        except Exception as e:
-            logger.error(f"Failed to delete collection {project}: {e}")
-            return False
+                return True
+            except Exception as e:
+                logger.error(f"Failed to delete collection {project}: {e}")
+                return False
 
 
 # Global singleton instance with thread-safe initialization

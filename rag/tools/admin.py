@@ -86,7 +86,9 @@ def register_admin_tools(mcp):
                     return {"error": f"Invalid project name: {err}"}
 
             if action == "create":
-                pm.create_project(project)
+                result = pm.create_project(project)
+                if result and result.get("error"):
+                    return result
                 return {
                     "success": f"Created project: {project}",
                     "next_step": f"Add keywords: manage_project(action='update', project='{project}', keywords=['term1', 'term2'])"
@@ -151,7 +153,7 @@ def register_admin_tools(mcp):
                 return {
                     "index_loads": stats.index_loads,
                     "index_cache_hits": stats.index_cache_hits,
-                    "cache_hit_rate": f"{stats.cache_hit_rate:.1%}"
+                    "cache_hit_rate": f"{stats.get_hit_rate('index'):.1f}%"
                 }
             
             # Default: index stats
