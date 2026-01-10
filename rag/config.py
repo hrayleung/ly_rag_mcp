@@ -252,6 +252,14 @@ class RAGSettings:
     ingest_manifest_filename: str = "ingest_manifest.json"
     tracking_filename: str = "indexed_files.json"
 
+    # ChromaDB connection (remote or local)
+    chroma_host: str | None = field(init=False)
+    chroma_port: int | None = field(init=False)
+    chroma_api_key: str | None = field(init=False)
+    chroma_ssl: bool = field(init=False)
+    chroma_tenant: str = field(init=False)
+    chroma_database: str = field(init=False)
+
     def __post_init__(self):
         self.storage_path = self.script_dir / "storage"
 
@@ -264,6 +272,20 @@ class RAGSettings:
             )
         self.embedding_provider = provider
         self.embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-large")
+
+        # ChromaDB remote connection settings
+        self.chroma_host = os.getenv("CHROMA_HOST")
+        port_str = os.getenv("CHROMA_PORT")
+        self.chroma_port = int(port_str) if port_str else None
+        self.chroma_api_key = os.getenv("CHROMA_API_KEY")
+        self.chroma_ssl = os.getenv("CHROMA_SSL", "false").lower() in ("true", "1", "yes")
+        self.chroma_tenant = os.getenv("CHROMA_TENANT", "default_tenant")
+        self.chroma_database = os.getenv("CHROMA_DATABASE", "default_database")
+
+    @property
+    def use_remote_chroma(self) -> bool:
+        """Check if remote ChromaDB is configured."""
+        return self.chroma_host is not None
 
     @property
     def max_file_size_bytes(self) -> int:
