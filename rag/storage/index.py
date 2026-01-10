@@ -19,7 +19,7 @@ from llama_index.core import (
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.vector_stores.chroma import ChromaVectorStore
 
-from rag.config import settings, logger
+from rag.config import settings, logger, validate_top_k
 from rag.embeddings import get_embedding_model
 from rag.models import CacheStats
 from rag.storage.chroma import get_chroma_manager
@@ -264,20 +264,7 @@ class IndexManager:
         Returns:
             LlamaIndex retriever
         """
-        # Store original value for accurate logging
-        original_top_k = similarity_top_k
-        top_k = similarity_top_k or settings.default_top_k
-
-        # Validate and clamp top_k to safe bounds
-        if not isinstance(top_k, int):
-            top_k = int(top_k)
-        if top_k < settings.min_top_k:
-            logger.warning(f"top_k too small ({original_top_k}), using {settings.min_top_k}")
-            top_k = settings.min_top_k
-        if top_k > settings.max_top_k:
-            logger.warning(f"top_k too large ({original_top_k}), using {settings.max_top_k}")
-            top_k = settings.max_top_k
-
+        top_k = validate_top_k(similarity_top_k)
         index = self.get_index(project)
         return index.as_retriever(similarity_top_k=top_k)
 

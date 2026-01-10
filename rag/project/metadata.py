@@ -52,30 +52,22 @@ STALE_LOCK_THRESHOLD_SECONDS = 300  # 5 minutes
 
 def _acquire_file_lock(lock_handle, path: Path) -> bool:
     """
-    Best-effort cross-platform file lock with retry logic.
+    Cross-platform file lock with retry logic.
 
-    Returns:
-        bool: True if lock acquired, False if locking unavailable
-
-    Note:
-        Logs warning when file locking is unavailable on the platform.
-        Requires fcntl (Unix) or msvcrt (Windows) for proper locking.
-        On platforms without locking support, returns False and logs a warning.
+    Returns True if lock acquired, False if locking unavailable.
     """
     max_retries = 3
-    retry_delay = 0.1  # 100ms
+    retry_delay = 0.1
 
     for attempt in range(max_retries):
         if fcntl and os.name != "nt":
             try:
-                # Try non-blocking lock first
                 fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 return True
             except OSError as e:
-                if e.errno == 11:  # EAGAIN - would block
-                    if attempt < max_retries - 1:
-                        time.sleep(retry_delay * (2 ** attempt))  # Exponential backoff
-                        continue
+                if e.errno == 11 and attempt < max_retries - 1:  # EAGAIN
+                    time.sleep(retry_delay * (2 ** attempt))
+                    continue
                 logger.warning(f"Failed to lock {path}: {e}")
         elif msvcrt and os.name == "nt":
             try:
@@ -83,17 +75,14 @@ def _acquire_file_lock(lock_handle, path: Path) -> bool:
                 msvcrt.locking(lock_handle.fileno(), msvcrt.LK_LOCK, _WINDOWS_LOCK_LENGTH)
                 return True
             except OSError as e:
-                if e.errno == 33:  # ERROR_LOCK_VIOLATION
-                    if attempt < max_retries - 1:
-                        time.sleep(retry_delay * (2 ** attempt))  # Exponential backoff
-                        continue
+                if e.errno == 33 and attempt < max_retries - 1:  # ERROR_LOCK_VIOLATION
+                    time.sleep(retry_delay * (2 ** attempt))
+                    continue
                 logger.warning(f"Failed to lock {path}: {e}")
         else:
-            # No locking support - log warning once per session
             logger.warning(
                 f"File locking unavailable on this platform ({os.name}). "
-                f"Concurrent access to {path} is not protected. "
-                f"Install platform-specific locking modules (fcntl/msvcrt)."
+                f"Concurrent access to {path} is not protected."
             )
             return False
 
@@ -117,19 +106,10 @@ def _release_file_lock(lock_handle, path: Path, locked: bool) -> None:
 @contextmanager
 def _file_lock(path: Path, force_break_stale_locks: bool = False):
     """
-    Context manager to create a separate lock file and apply a best-effort lock.
+    Context manager to create a lock file for safe concurrent access.
 
-    Args:
-        path: Path to the file being locked
-        force_break_stale_locks: If True, breaks locks older than STALE_LOCK_THRESHOLD_SECONDS
-
-    Raises:
-        TimeoutError: If lock cannot be acquired after retries
-
-    Note:
-        Lock files contain timestamp and PID for stale lock detection.
-        Stale locks (>5 minutes old) are automatically broken to handle crashed processes.
-        Lock file is cleaned up on both success and exception paths.
+    Raises TimeoutError if lock cannot be acquired after retries.
+    Stale locks (>5 minutes old) are automatically broken.
     """
     lock_path = path.with_suffix(path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -143,18 +123,14 @@ def _file_lock(path: Path, force_break_stale_locks: bool = False):
                 lock_stat = lock_path.stat()
                 lock_age = time.time() - lock_stat.st_mtime
                 if lock_age > STALE_LOCK_THRESHOLD_SECONDS:
-                    logger.info(
-                        f"Breaking stale lock for {path} "
-                        f"(age: {lock_age:.1f}s > {STALE_LOCK_THRESHOLD_SECONDS}s)"
-                    )
+                    logger.info(f"Breaking stale lock for {path} (age: {lock_age:.1f}s)")
                     lock_path.unlink(missing_ok=True)
             except OSError as e:
                 logger.warning(f"Failed to check/break stale lock {lock_path}: {e}")
 
-        # Use a separate lock file with timestamp and PID
         lock_handle = lock_path.open("w+b")
 
-        # Write lock metadata (timestamp + PID) for stale detection
+        # Write lock metadata for stale detection
         try:
             lock_data = json.dumps({
                 "timestamp": time.time(),
@@ -174,16 +150,15 @@ def _file_lock(path: Path, force_break_stale_locks: bool = False):
             time.sleep(LOCK_RETRY_DELAY * (2 ** attempt))
 
         if not locked:
-            raise TimeoutError(f"Could not acquire lock for {path} (via {lock_path})")
+            raise TimeoutError(f"Could not acquire lock for {path}")
 
         yield
 
     except (OSError, TimeoutError) as e:
         logger.warning(f"Lock operation failed for {path}: {e}")
-        raise  # Re-raise to prevent unsafe operations
+        raise
 
     finally:
-        # Always cleanup lock file, even on exception
         if lock_handle:
             if locked:
                 _release_file_lock(lock_handle, lock_path, locked)
@@ -192,7 +167,6 @@ def _file_lock(path: Path, force_break_stale_locks: bool = False):
             except OSError:
                 pass
 
-        # Delete lock file (Bug H7 fix)
         try:
             lock_path.unlink(missing_ok=True)
         except OSError as e:
@@ -201,21 +175,9 @@ def _file_lock(path: Path, force_break_stale_locks: bool = False):
 
 def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
     """
-    Atomically write JSON to disk using a temp file and os.replace.
+    Atomically write JSON to disk using temp file and os.replace.
 
-    Ensures durability via flush + fsync. Raises exception on directory fsync
-    failure to prevent silent data loss on power failure.
-
-    Args:
-        path: Destination file path
-        payload: JSON-serializable dictionary to write
-
-    Raises:
-        OSError: If atomic write or directory fsync fails
-
-    Note:
-        Directory fsync is critical for durability - if rename crashes before
-        directory metadata persists, the file may be lost on power failure.
+    Ensures durability via flush + fsync. Raises OSError on failure.
     """
     temp_path: Optional[Path] = None
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -229,8 +191,7 @@ def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
             os.fsync(tmp.fileno())
         os.replace(temp_path, path)
 
-        # Fsync parent directory for durability (ensures rename persists on crash)
-        # Bug H9 fix: Re-raise exception instead of just logging
+        # Fsync parent directory for durability
         try:
             dir_fd = os.open(path.parent, os.O_RDONLY)
             try:
@@ -238,13 +199,9 @@ def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
             finally:
                 os.close(dir_fd)
         except OSError as e:
-            logger.error(
-                f"Critical: Failed to fsync parent directory for {path}: {e}. "
-                f"Data may be lost on power failure. System may not support directory fsync."
-            )
-            raise  # Re-raise to prevent silent data loss
+            logger.error(f"Failed to fsync parent directory for {path}: {e}")
+            raise
 
-        # Verify the file was written
         if not path.exists():
             raise OSError(f"Failed to write {path}: os.replace() did not create file")
     finally:

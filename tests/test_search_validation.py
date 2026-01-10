@@ -1,6 +1,6 @@
 """Tests for search input validation and mode selection.
 
-Focuses on SearchEngine._validate_query, _validate_top_k, and _select_search_mode.
+Focuses on SearchEngine._validate_query, validate_top_k, and _select_search_mode.
 """
 
 from __future__ import annotations
@@ -49,26 +49,27 @@ def test_validate_query_strips_and_truncates(search_engine, monkeypatch):
     assert search_engine._validate_query("  hello world  ") == "hello"  # truncated
 
 
-def test_validate_top_k_defaults_and_coerces(search_engine, monkeypatch):
-    import rag.retrieval.search as search_mod
+def test_validate_top_k_defaults_and_coerces(monkeypatch):
+    """Test that validate_top_k uses defaults and coerces types."""
+    import rag.config as config_mod
 
-    monkeypatch.setattr(search_mod.settings, "default_top_k", 6)
-    monkeypatch.setattr(search_mod.settings, "min_top_k", 1)
-    monkeypatch.setattr(search_mod.settings, "max_top_k", 50)
+    monkeypatch.setattr(config_mod.settings, "default_top_k", 6)
+    monkeypatch.setattr(config_mod.settings, "min_top_k", 1)
+    monkeypatch.setattr(config_mod.settings, "max_top_k", 50)
 
-    assert search_engine._validate_top_k(None) == 6
-    assert search_engine._validate_top_k("7") == 7  # type: ignore[arg-type]
+    assert config_mod.validate_top_k(None) == 6
+    assert config_mod.validate_top_k("7") == 7  # type: ignore[arg-type]
 
 
-def test_validate_top_k_clamps_to_min_and_max(search_engine, monkeypatch):
-    import rag.retrieval.search as search_mod
+def test_validate_top_k_clamps_to_min_and_max(monkeypatch):
+    import rag.config as config_mod
 
-    monkeypatch.setattr(search_mod.settings, "default_top_k", 6)
-    monkeypatch.setattr(search_mod.settings, "min_top_k", 2)
-    monkeypatch.setattr(search_mod.settings, "max_top_k", 4)
+    monkeypatch.setattr(config_mod.settings, "default_top_k", 6)
+    monkeypatch.setattr(config_mod.settings, "min_top_k", 2)
+    monkeypatch.setattr(config_mod.settings, "max_top_k", 4)
 
-    assert search_engine._validate_top_k(1) == 2
-    assert search_engine._validate_top_k(999) == 4
+    assert config_mod.validate_top_k(1) == 2
+    assert config_mod.validate_top_k(999) == 4
 
 
 def test_select_search_mode_respects_explicit_hybrid_and_keyword(search_engine):
@@ -150,6 +151,7 @@ def test_select_search_mode_defaults_to_semantic(search_engine):
 
 
 def test_bm25_retriever_called_with_collection(monkeypatch):
+    """Test that BM25 retriever is called with correct collection."""
     import rag.retrieval.search as search_mod
 
     calls = []
@@ -175,7 +177,9 @@ def test_bm25_retriever_called_with_collection(monkeypatch):
     engine._bm25_manager = FakeBM25()
     monkeypatch.setattr(search_mod, "get_chroma_manager", lambda: FakeChroma())
 
-    retriever = engine._get_keyword_retriever(FakeIndex(), top_k=5, project="proj")
+    # Test _get_bm25_retriever directly (used by both KEYWORD and HYBRID modes)
+    retriever = engine._get_bm25_retriever(FakeIndex(), top_k=5, project="proj")
 
     assert calls == [(ANY, "collection", "proj")]
-    assert retriever == "vector-5"
+    # Returns None since FakeBM25 returns None
+    assert retriever is None

@@ -360,6 +360,33 @@ def get_gemini_key() -> str | None:
     return None
 
 
+def validate_top_k(top_k: int | None) -> int:
+    """
+    Validate and clamp top_k parameter to safe bounds.
+
+    Args:
+        top_k: The top_k value to validate, or None to use default
+
+    Returns:
+        Validated top_k value clamped between min_top_k and max_top_k
+    """
+    if top_k is None:
+        return settings.default_top_k
+
+    if not isinstance(top_k, int):
+        top_k = int(top_k)
+
+    if top_k < settings.min_top_k:
+        logger.warning(f"top_k={top_k} too small, using {settings.min_top_k}")
+        return settings.min_top_k
+
+    if top_k > settings.max_top_k:
+        logger.warning(f"top_k={top_k} too large, using {settings.max_top_k}")
+        return settings.max_top_k
+
+    return top_k
+
+
 def validate_required_keys() -> dict[str, str]:
     """
     Validate all required API keys at startup.

@@ -9,7 +9,7 @@ from typing import List, Optional, Tuple
 
 from llama_index.core.retrievers import QueryFusionRetriever
 
-from rag.config import settings, logger
+from rag.config import settings, logger, validate_top_k
 from rag.models import SearchMode, SearchResult, RetrievalResult
 from rag.storage.index import get_index_manager
 from rag.storage.chroma import get_chroma_manager
@@ -70,7 +70,7 @@ class SearchEngine:
 
         # Validate inputs
         question = self._validate_query(question)
-        top_k = self._validate_top_k(similarity_top_k)
+        top_k = validate_top_k(similarity_top_k)
 
         # Determine effective search mode
         try:
@@ -154,33 +154,13 @@ class SearchEngine:
 
         return query
 
-    def _validate_top_k(self, top_k: Optional[int]) -> int:
-        """Validate and clamp top_k parameter."""
-        if top_k is None:
-            return settings.default_top_k
-
-        if not isinstance(top_k, int):
-            top_k = int(top_k)
-
-        if top_k < settings.min_top_k:
-            logger.warning(f"top_k={top_k} too small, using {settings.min_top_k}")
-            return settings.min_top_k
-
-        if top_k > settings.max_top_k:
-            logger.warning(f"top_k={top_k} too large, using {settings.max_top_k}")
-            return settings.max_top_k
-
-        return top_k
-
     def _select_search_mode(
         self,
         question: str,
         requested: SearchMode
     ) -> SearchMode:
-        """
-        Select appropriate search mode based on query analysis.
-        """
-        # Respect ALL explicit mode requests including SEMANTIC (Bug M4)
+        """Select appropriate search mode based on query analysis."""
+        # Respect explicit mode requests
         if requested in (SearchMode.KEYWORD, SearchMode.HYBRID, SearchMode.SEMANTIC):
             return requested
 
@@ -189,7 +169,7 @@ class SearchEngine:
         has_code_chars = bool(CODE_SNIPPET_RE.search(question))
 
         tokens = question.split()
-        num_tokens = len(tokens)  # Cache len() call
+        num_tokens = len(tokens)
         if num_tokens <= 1:
             return SearchMode.KEYWORD
 
@@ -197,7 +177,6 @@ class SearchEngine:
             logger.debug("Path-like token detected, using hybrid search")
             return SearchMode.HYBRID
 
-        # Cache repeated len(tokens) calls in ratio calculations
         uppercase_ratio = (
             sum(1 for t in tokens if t.isupper() and len(t) > 1) / num_tokens
             if tokens else 0
@@ -291,30 +270,21 @@ class SearchEngine:
         project: str
     ):
         """Get appropriate retriever based on search mode."""
-        if mode == SearchMode.HYBRID:
-            return self._get_hybrid_retriever(index, top_k, project)
-        elif mode == SearchMode.KEYWORD:
-            return self._get_keyword_retriever(index, top_k, project)
-        else:
+        if mode == SearchMode.SEMANTIC:
             return index.as_retriever(similarity_top_k=top_k)
 
-    def _get_hybrid_retriever(self, index, top_k: int, project: str):
-        """Get hybrid retriever combining vector and BM25."""
-        self._ensure_managers()
-        vector_retriever = index.as_retriever(similarity_top_k=top_k)
+        # HYBRID and KEYWORD both need BM25 retriever
+        bm25_retriever = self._get_bm25_retriever(index, top_k, project)
 
-        chroma_manager = get_chroma_manager()
-        _, collection = chroma_manager.get_client(project)
+        if mode == SearchMode.KEYWORD:
+            if bm25_retriever is not None:
+                return bm25_retriever
+            logger.warning("BM25 unavailable, falling back to vector search")
+            return index.as_retriever(similarity_top_k=top_k)
 
-        # Validate collection before using for BM25 fallback
-        if collection is not None:
-            bm25_retriever = self._bm25_manager.get_retriever(index, collection, project)
-        else:
-            logger.warning("ChromaDB collection unavailable, BM25 disabled")
-            bm25_retriever = None
-
-        if bm25_retriever:
-            bm25_retriever.similarity_top_k = top_k
+        # HYBRID mode
+        if bm25_retriever is not None:
+            vector_retriever = index.as_retriever(similarity_top_k=top_k)
             return QueryFusionRetriever(
                 [vector_retriever, bm25_retriever],
                 similarity_top_k=top_k,
@@ -325,27 +295,22 @@ class SearchEngine:
             )
 
         logger.warning("BM25 unavailable, falling back to vector-only")
-        return vector_retriever
+        return index.as_retriever(similarity_top_k=top_k)
 
-    def _get_keyword_retriever(self, index, top_k: int, project: str):
-        """Get BM25-only retriever."""
+    def _get_bm25_retriever(self, index, top_k: int, project: str):
+        """Get BM25 retriever if available."""
         self._ensure_managers()
         chroma_manager = get_chroma_manager()
         _, collection = chroma_manager.get_client(project)
 
-        # Validate collection before using for BM25 fallback
-        if collection is not None:
-            bm25_retriever = self._bm25_manager.get_retriever(index, collection, project)
-        else:
+        if collection is None:
             logger.warning("ChromaDB collection unavailable, BM25 disabled")
-            bm25_retriever = None
+            return None
 
-        if bm25_retriever:
+        bm25_retriever = self._bm25_manager.get_retriever(index, collection, project)
+        if bm25_retriever is not None:
             bm25_retriever.similarity_top_k = top_k
-            return bm25_retriever
-
-        logger.warning("BM25 unavailable, falling back to vector search")
-        return index.as_retriever(similarity_top_k=top_k)
+        return bm25_retriever
 
 
 # Global singleton

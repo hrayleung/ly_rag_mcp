@@ -209,19 +209,18 @@ class CacheStats:
         if category not in self.VALID_CATEGORIES:
             raise ValueError(f"Invalid category: {category}. Valid categories: {self.VALID_CATEGORIES}")
 
-        if category == "index":
-            total = self.index_loads + self.index_cache_hits
-            return (self.index_cache_hits / total * 100) if total > 0 else 0
-        elif category == "reranker":
-            total = self.reranker_loads + self.reranker_cache_hits
-            return (self.reranker_cache_hits / total * 100) if total > 0 else 0
-        elif category == "chroma":
-            total = self.chroma_loads + self.chroma_cache_hits
-            return (self.chroma_cache_hits / total * 100) if total > 0 else 0
-        elif category == "bm25":
-            total = self.bm25_builds + self.bm25_cache_hits
-            return (self.bm25_cache_hits / total * 100) if total > 0 else 0
-        return 0
+        # Map category to (loads_attr, hits_attr)
+        attr_map = {
+            "index": ("index_loads", "index_cache_hits"),
+            "reranker": ("reranker_loads", "reranker_cache_hits"),
+            "chroma": ("chroma_loads", "chroma_cache_hits"),
+            "bm25": ("bm25_builds", "bm25_cache_hits"),
+        }
+        loads_attr, hits_attr = attr_map[category]
+        loads = getattr(self, loads_attr)
+        hits = getattr(self, hits_attr)
+        total = loads + hits
+        return (hits / total * 100) if total > 0 else 0
 
     def reset(self, category: Optional[str] = None) -> None:
         """Reset statistics for a category or all categories."""
@@ -229,18 +228,15 @@ class CacheStats:
             if category not in self.VALID_CATEGORIES:
                 raise ValueError(f"Invalid category: {category}. Valid categories: {self.VALID_CATEGORIES}")
 
-            if category == "index":
-                self.index_loads = 0
-                self.index_cache_hits = 0
-            elif category == "reranker":
-                self.reranker_loads = 0
-                self.reranker_cache_hits = 0
-            elif category == "chroma":
-                self.chroma_loads = 0
-                self.chroma_cache_hits = 0
-            elif category == "bm25":
-                self.bm25_builds = 0
-                self.bm25_cache_hits = 0
+            # Map category to attribute names to reset
+            attr_map = {
+                "index": ("index_loads", "index_cache_hits"),
+                "reranker": ("reranker_loads", "reranker_cache_hits"),
+                "chroma": ("chroma_loads", "chroma_cache_hits"),
+                "bm25": ("bm25_builds", "bm25_cache_hits"),
+            }
+            for attr in attr_map[category]:
+                setattr(self, attr, 0)
         else:
             # Reset all
             self.index_loads = 0

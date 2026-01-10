@@ -316,37 +316,35 @@ class ProjectManager:
         return best_project
     
     def _score_project_match(
-        self, 
-        project: str, 
-        metadata: ProjectMetadata, 
+        self,
+        project: str,
+        metadata: ProjectMetadata,
         text: str
     ) -> float:
         """Score how well a project matches text."""
         score = 0.0
         project_lower = project.lower()
-        
-        # Project name match
+
+        # Project name match (word boundary)
         if re.search(rf'\b{re.escape(project_lower)}\b', text):
             score += len(project_lower)
-        
+
         # Display name match
         if metadata.display_name:
             name_lower = metadata.display_name.lower()
             if name_lower != project_lower and name_lower in text:
                 score += 2
-        
-        # Keyword matches - use word boundary for higher score (Bug M5)
+
+        # Keyword matches - use word boundary for higher score
         for keyword in (metadata.keywords or []):
             if not keyword:
                 continue
             keyword_lower = keyword.lower()
-            # Exact word boundary match gets higher score
             if re.search(rf'\b{re.escape(keyword_lower)}\b', text):
-                score += 5
-            # Partial substring match gets lower score
+                score += 5  # Exact word boundary match
             elif keyword_lower in text:
-                score += 2
-        
+                score += 2  # Partial substring match
+
         # Path matches
         for path_hint in (metadata.default_paths or []):
             try:
@@ -356,40 +354,7 @@ class ProjectManager:
             except Exception:
                 pass
 
-        # File extension matches (indicates project type)
-        common_extensions = {
-            '.py': 'python',
-            '.js': 'javascript', '.ts': 'typescript', '.jsx': 'react', '.tsx': 'react',
-            '.go': 'go', '.rs': 'rust', '.java': 'java', '.cpp': 'cpp', '.c': 'c',
-            '.rb': 'ruby', '.php': 'php', '.swift': 'swift', '.kt': 'kotlin',
-            '.scala': 'scala', '.r': 'r', '.sh': 'shell', '.sql': 'sql',
-            '.vue': 'vue', '.svelte': 'svelte', '.astro': 'astro'
-        }
-
-        for ext, lang in common_extensions.items():
-            if ext in text.lower() and lang in project_lower:
-                score += 2
-
-        # Framework/library mentions
-        framework_patterns = {
-            'react': ['react', 'jsx', 'hooks', 'components'],
-            'vue': ['vue', 'template', 'reactive'],
-            'django': ['django', 'models', 'views', 'urls'],
-            'flask': ['flask', 'blueprint', 'jinja'],
-            'express': ['express', 'middleware', 'routes'],
-            'fastapi': ['fastapi', 'pydantic', 'endpoint'],
-            'spring': ['spring', 'bean', 'autowired'],
-            'rails': ['rails', 'activerecord', 'migration'],
-        }
-
-        for framework, keywords in framework_patterns.items():
-            if framework in project_lower:
-                for keyword in keywords:
-                    if keyword in text_lower:
-                        score += 1.5
-                        break
-
-        # Description matching (if available)
+        # Description word overlap
         if metadata.description:
             desc_words = set(re.findall(r'\b\w+\b', metadata.description.lower()))
             text_words = set(re.findall(r'\b\w+\b', text))

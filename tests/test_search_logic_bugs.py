@@ -247,8 +247,9 @@ def test_bm25_get_retriever_signature_accepts_project():
 
 
 def test_bm25_hybrid_retriever_no_try_except(monkeypatch):
-    """H12: Verify _get_hybrid_retriever doesn't have try/except TypeError."""
+    """H12: Verify _get_retriever handles HYBRID mode correctly with BM25."""
     from rag.retrieval.search import SearchEngine
+    from rag.models import SearchMode
 
     mock_index_mgr = MagicMock()
     mock_bm25_mgr = MagicMock()
@@ -273,8 +274,8 @@ def test_bm25_hybrid_retriever_no_try_except(monkeypatch):
 
     engine = SearchEngine()
 
-    # Call _get_hybrid_retriever
-    retriever = engine._get_hybrid_retriever(mock_index, 5, "test_project")
+    # Call _get_retriever with HYBRID mode
+    retriever = engine._get_retriever(mock_index, SearchMode.HYBRID, 5, "test_project")
 
     # Verify BM25 was called with project parameter
     mock_bm25_mgr.get_retriever.assert_called_once_with(mock_index, mock_collection, "test_project")
@@ -284,8 +285,9 @@ def test_bm25_hybrid_retriever_no_try_except(monkeypatch):
 
 
 def test_bm25_keyword_retriever_no_try_except(monkeypatch):
-    """H12: Verify _get_keyword_retriever doesn't have try/except TypeError."""
+    """H12: Verify _get_retriever handles KEYWORD mode correctly."""
     from rag.retrieval.search import SearchEngine
+    from rag.models import SearchMode
 
     mock_index_mgr = MagicMock()
     mock_bm25_mgr = MagicMock()
@@ -309,8 +311,8 @@ def test_bm25_keyword_retriever_no_try_except(monkeypatch):
 
     engine = SearchEngine()
 
-    # Call _get_keyword_retriever
-    retriever = engine._get_keyword_retriever(mock_index, 5, "test_project")
+    # Call _get_retriever with KEYWORD mode
+    retriever = engine._get_retriever(mock_index, SearchMode.KEYWORD, 5, "test_project")
 
     # Verify BM25 was called with project parameter
     mock_bm25_mgr.get_retriever.assert_called_once_with(mock_index, mock_collection, "test_project")
@@ -323,6 +325,7 @@ def test_bm25_keyword_retriever_no_try_except(monkeypatch):
 def test_bm25_fallback_to_vector_on_none(monkeypatch):
     """H12: Verify when BM25 returns None, falls back to vector search."""
     from rag.retrieval.search import SearchEngine
+    from rag.models import SearchMode
 
     mock_index_mgr = MagicMock()
     mock_bm25_mgr = MagicMock()
@@ -349,11 +352,15 @@ def test_bm25_fallback_to_vector_on_none(monkeypatch):
     engine = SearchEngine()
 
     # Test keyword mode
-    retriever = engine._get_keyword_retriever(mock_index, 5, "test_project")
+    retriever = engine._get_retriever(mock_index, SearchMode.KEYWORD, 5, "test_project")
     assert retriever == mock_vector_retriever
 
+    # Reset mock
+    mock_index.as_retriever.reset_mock()
+    mock_bm25_mgr.get_retriever.reset_mock()
+
     # Test hybrid mode
-    retriever = engine._get_hybrid_retriever(mock_index, 5, "test_project")
+    retriever = engine._get_retriever(mock_index, SearchMode.HYBRID, 5, "test_project")
     assert retriever == mock_vector_retriever
 
 

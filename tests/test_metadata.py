@@ -878,9 +878,9 @@ class TestDirectorySyncFailure:
             with pytest.raises(OSError):
                 _atomic_write_json(test_path, {"test": "data"})
 
-        # Should log error (not just warning)
+        # Should log error
         assert any(
-            "Critical" in record.message and "Failed to fsync parent directory" in record.message
+            "Failed to fsync parent directory" in record.message
             for record in caplog.records
         )
 

@@ -124,8 +124,8 @@ def test_get_retriever_log_messages(monkeypatch, tmp_path, caplog):
         retr = mgr.get_retriever(project="p", similarity_top_k=1)
         assert retr == ("retriever", 2)  # Clamped to min_top_k
 
-    # Check that warning shows original value (1), not clamped value (2)
-    assert any("top_k too small (1)" in record.message for record in caplog.records)
+    # Check that warning shows original value
+    assert any("top_k=1 too small" in record.message for record in caplog.records)
     caplog.clear()
 
     # Test log message when top_k too large
@@ -133,6 +133,6 @@ def test_get_retriever_log_messages(monkeypatch, tmp_path, caplog):
         retr = mgr.get_retriever(project="p", similarity_top_k=50)
         assert retr == ("retriever", 20)  # Clamped to max_top_k
 
-    # Check that warning shows original value (50), not clamped value (20)
-    assert any("top_k too large (50)" in record.message for record in caplog.records)
+    # Check that warning shows original value
+    assert any("top_k=50 too large" in record.message for record in caplog.records)
 
